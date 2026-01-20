@@ -28,12 +28,15 @@ public class EntityWorker<T> {
 
     private final int maxWaiters;
     private final String threadNamePrefix;
+    private final java.util.concurrent.ExecutorService executor;
 
-    public EntityWorker(String key, Consumer<CoalescingBatch<T>> processor, int maxWaiters, String threadNamePrefix) {
+    public EntityWorker(String key, Consumer<CoalescingBatch<T>> processor, int maxWaiters, String threadNamePrefix,
+            java.util.concurrent.ExecutorService executor) {
         this.key = key;
         this.processor = processor;
         this.maxWaiters = maxWaiters;
         this.threadNamePrefix = threadNamePrefix;
+        this.executor = executor;
     }
 
     /**
@@ -61,7 +64,8 @@ public class EntityWorker<T> {
 
             if (!isRunning) {
                 isRunning = true;
-                Thread.ofVirtual().name(threadNamePrefix + key).start(this::runLoop);
+                // Use shared executor to avoid thread name string building overhead
+                executor.execute(this::runLoop);
             }
         } finally {
             lock.unlock();

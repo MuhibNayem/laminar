@@ -20,7 +20,7 @@ public class CoalescingBatch<T> {
 
     public CoalescingBatch(Mutation<T> initialMutation) {
         this.accumulatedMutation = initialMutation;
-        this.waiters = new ArrayList<>();
+        this.waiters = new ArrayList<>(1);
     }
 
     /**

@@ -68,7 +68,8 @@ public class LaminarEngine<T> implements LaminarDispatcher<T>, AutoCloseable {
         }
 
         String key = mutation.getEntityKey();
-        EntityWorker<T> worker = workers.get(key, k -> new EntityWorker<>(k, dbExecutor, maxWaiters, threadNamePrefix));
+        EntityWorker<T> worker = workers.get(key,
+                k -> new EntityWorker<>(k, dbExecutor, maxWaiters, threadNamePrefix, sharedExecutor));
 
         return worker.submit(mutation)
                 .whenComplete((result, error) -> globalSemaphore.release());
