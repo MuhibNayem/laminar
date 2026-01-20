@@ -1,0 +1,32 @@
+# Example Laminar Configuration for Spring Boot
+# Place this in src/main/resources/application.yml
+
+laminar:
+  # Maximum number of pending requests per entity worker before rejecting (backpressure)
+  # Default: 1000
+  max-waiters: 10000
+  
+  # Timeout for database load/save operations
+  # Default: 30s
+  # Formats: 5s, 500ms, 1m, etc.
+  timeout: 5s
+  
+  # How long to retain idle workers in cache before eviction
+  # Default: 10m
+  worker-eviction-time: 5m
+  
+  # Maximum number of concurrent entity workers (0 = unbounded)
+  # Default: 0 (unbounded)
+  max-cached-workers: 100000
+  
+  # Timeout for graceful shutdown draining
+  # Default: 10s
+  shutdown-timeout: 30s
+  
+  # Polling interval during shutdown to check worker status
+  # Default: 100ms
+  shutdown-polling-interval: 50ms
+  
+  # Virtual thread name prefix for observability
+  # Default: "laminar-worker-"
+  thread-name-prefix: "my-app-worker-"
