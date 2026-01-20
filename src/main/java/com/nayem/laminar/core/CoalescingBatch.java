@@ -15,7 +15,7 @@ import java.util.concurrent.CompletableFuture;
  * @param <T> The entity type
  */
 public class CoalescingBatch<T> {
-    private Mutation<T> accumulatedMutation;
+    private volatile Mutation<T> accumulatedMutation;
     private final List<CompletableFuture<Void>> waiters;
 
     public CoalescingBatch(Mutation<T> initialMutation) {

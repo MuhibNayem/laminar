@@ -1,16 +1,13 @@
 package com.nayem.laminar.spring;
 
 import com.nayem.laminar.core.Mutation;
-import com.nayem.laminar.core.LaminarEngine;
+import com.nayem.laminar.core.LaminarDispatcher;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
-import org.springframework.util.ReflectionUtils;
 
-import java.lang.reflect.Method;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
-import java.util.concurrent.CompletableFuture;
 
 @Aspect
 public class LaminarAspect {
@@ -37,13 +34,13 @@ public class LaminarAspect {
                     "Could not determine Entity Type for Mutation: " + mutation.getClass().getName());
         }
 
-        LaminarEngine<Object> engine = (LaminarEngine<Object>) registry.getEngine(entityType);
+        LaminarDispatcher<Object> dispatcher = (LaminarDispatcher<Object>) registry.getDispatcher(entityType);
 
-        if (engine == null) {
+        if (dispatcher == null) {
             throw new IllegalStateException("No LaminarHandler found for entity type: " + entityType.getName());
         }
 
-        engine.dispatch((Mutation<Object>) mutation);
+        dispatcher.dispatch((Mutation<Object>) mutation);
 
         return result;
     }

@@ -1,23 +1,41 @@
 package com.nayem.laminar.spring;
 
-import com.nayem.laminar.core.LaminarEngine;
+import com.nayem.laminar.core.LaminarDispatcher;
 
 import java.util.Map;
 
-public class LaminarRegistry {
-    private final Map<Class<?>, LaminarEngine<?>> engines;
+public class LaminarRegistry implements org.springframework.beans.factory.DisposableBean {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(LaminarRegistry.class);
 
-    public LaminarRegistry(Map<Class<?>, LaminarEngine<?>> engines) {
-        this.engines = engines;
+    private final Map<Class<?>, LaminarDispatcher<?>> dispatchers;
+    private final java.util.List<AutoCloseable> resources;
+
+    public LaminarRegistry(Map<Class<?>, LaminarDispatcher<?>> dispatchers, java.util.List<AutoCloseable> resources) {
+        this.dispatchers = dispatchers;
+        this.resources = resources;
     }
 
     @SuppressWarnings("unchecked")
-    public <T> LaminarEngine<T> getEngine(Class<T> type) {
-        return (LaminarEngine<T>) engines.get(type);
+    public <T> LaminarDispatcher<T> getDispatcher(Class<T> type) {
+        // Dispatcher lookup
+        return (LaminarDispatcher<T>) dispatchers.get(type);
     }
 
-    @jakarta.annotation.PreDestroy
-    public void shutdown() {
-        engines.values().forEach(LaminarEngine::shutdown);
+    @Override
+    public void destroy() {
+        log.info("LaminarRegistry shutting down, closing {} resources...", resources.size());
+        for (AutoCloseable resource : resources) {
+            try {
+                if (resource instanceof com.nayem.laminar.spring.ClusterWorkerManager) {
+                    ((com.nayem.laminar.spring.ClusterWorkerManager<?>) resource).shutdown();
+                } else if (resource instanceof com.nayem.laminar.core.LaminarEngine) {
+                    ((com.nayem.laminar.core.LaminarEngine<?>) resource).shutdown();
+                } else {
+                    resource.close();
+                }
+            } catch (Exception e) {
+                log.warn("Failed to close Laminar resource: {}", e.getMessage());
+            }
+        }
     }
 }

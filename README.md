@@ -52,6 +52,7 @@ Laminar intercepts those 10,000 requests, **merges them into ONE** operation (+1
 
 ### ✅ Configuration
 - **Spring Boot Properties**: All settings via `application.yml`
+- **Horizontal Scaling**: Native support for sharded clustering via Redis
 - **Builder API**: Fluent configuration for non-Spring usage
 - **Reasonable Defaults**: Works out-of-the-box
 
@@ -59,7 +60,7 @@ Laminar intercepts those 10,000 requests, **merges them into ONE** operation (+1
 
 ## 📦 Installation
 
-**Requirements**: Java 25 + Spring Boot 4.0.1
+**Requirements**: Java 25 + Spring Boot 4.0.1 + Redis (optional, for clustering)
 
 ```xml
 <dependency>
@@ -67,6 +68,35 @@ Laminar intercepts those 10,000 requests, **merges them into ONE** operation (+1
     <artifactId>Laminar</artifactId>
     <version>0.0.1-SNAPSHOT</version>
 </dependency>
+```
+
+---
+
+## 🌐 Horizontal Scaling (Clustering)
+
+Laminar supports **Distributed Linearization** through a sharded worker model using Redis Streams. This allows you to scale your application across multiple nodes while ensuring that all mutations for a specific entity key are still processed by exactly one worker in the cluster.
+
+### How it Works
+1. **Hashing**: Mutations are hashed by their `entityKey`.
+2. **Sharding**: The cluster is divided into N shards (default: 16).
+3. **Leasing**: Nodes in the cluster compete for "leases" on these shards using distributed locks.
+4. **Ordering**: Only the node that owns a shard's lease will consume and process its mutations, preserving strict linearization across the cluster.
+
+### Setup
+Add the Redis starter to your project:
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-data-redis</artifactId>
+</dependency>
+```
+
+Enable cluster mode in `application.yml`:
+```yaml
+laminar:
+  cluster:
+    enabled: true
+    shards: 32 # Higher shards = better distribution across many nodes
 ```
 
 ---

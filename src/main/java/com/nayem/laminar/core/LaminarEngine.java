@@ -7,7 +7,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-public class LaminarEngine<T> {
+public class LaminarEngine<T> implements LaminarDispatcher<T>, AutoCloseable {
 
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(LaminarEngine.class);
 
@@ -76,6 +76,11 @@ public class LaminarEngine<T> {
 
     public long getActiveWorkerCount() {
         return workers.estimatedSize();
+    }
+
+    @Override
+    public void close() {
+        shutdown();
     }
 
     public void shutdown() {
