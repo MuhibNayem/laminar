@@ -7,6 +7,9 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.EnableAspectJAutoProxy;
+import com.nayem.laminar.dlq.DeadLetterQueue;
+import com.nayem.laminar.dlq.InMemoryDeadLetterQueue;
+import com.nayem.laminar.dlq.RedisDeadLetterQueue;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.util.List;
@@ -31,24 +34,45 @@ public class LaminarAutoConfiguration {
                 .collect(Collectors.toMap(
                         LaminarHandler::getEntityType,
                         handler -> {
-                            // 1. Create the Local Engine (Always needed for processing)
-                            LaminarEngine<?> engine = LaminarEngine.builder()
-                                    .loader((String k) -> ((LaminarHandler<Object>) handler).load(k))
-                                    .saver((Object e) -> ((LaminarHandler<Object>) handler).save(e))
+                            @SuppressWarnings("unchecked")
+                            LaminarHandler<Object> objectHandler = (LaminarHandler<Object>) handler;
+
+                            LaminarEngine.Builder<Object> builder = LaminarEngine.<Object>builder()
+                                    .loader(objectHandler::load)
+                                    .saver(objectHandler::save)
                                     .metrics(registryProvider.getIfAvailable())
                                     .maxWaiters(properties.getMaxWaiters())
+                                    .maxBatchSize(properties.getMaxBatchSize())
+                                    .maxCoalesceIterations(properties.getMaxCoalesceIterations())
                                     .timeout(properties.getTimeout())
                                     .workerEvictionTime(properties.getWorkerEvictionTime())
                                     .maxCachedWorkers(properties.getMaxCachedWorkers())
                                     .shutdownTimeout(properties.getShutdownTimeout())
                                     .shutdownPollingInterval(properties.getShutdownPollingInterval())
-                                    .threadNamePrefix(properties.getThreadNamePrefix())
-                                    .build();
+                                    .threadNamePrefix(properties.getThreadNamePrefix());
 
-                            // Track for shutdown
-                            resources.add(engine);
+                            if (properties.getDlq().isEnabled()) {
+                                DeadLetterQueue<Object> dlq;
+                                String store = properties.getDlq().getStore();
+                                if ("redis".equalsIgnoreCase(store)) {
+                                    StringRedisTemplate redis = redisTemplateProvider.getIfAvailable();
+                                    ObjectMapper mapper = objectMapperProvider.getIfAvailable();
+                                    if (redis == null || mapper == null) {
+                                        throw new IllegalStateException(
+                                                "Redis and ObjectMapper are required for Redis DLQ");
+                                    }
+                                    dlq = new RedisDeadLetterQueue<>(redis, mapper,
+                                            (Class<Object>) handler.getEntityType(),
+                                            properties.getDlq().getTtl());
+                                } else {
+                                    dlq = new InMemoryDeadLetterQueue<>();
+                                }
+                                builder.dlq(dlq);
+                            }
 
-                            // 2. Decide: Return Engine (Local) or ClusterDispatcher (Distributed)
+                            LaminarEngine<?> builtEngine = builder.build();
+                            resources.add(builtEngine);
+
                             if (properties.getCluster().isEnabled()) {
                                 StringRedisTemplate redis = redisTemplateProvider.getIfAvailable();
                                 ObjectMapper mapper = objectMapperProvider.getIfAvailable();
@@ -57,9 +81,9 @@ public class LaminarAutoConfiguration {
                                             "Redis and ObjectMapper are required for Laminar Cluster Mode");
                                 }
 
-                                // Start the Worker Manager (Consumer)
-                                ClusterWorkerManager<?> manager = new ClusterWorkerManager(
-                                        engine,
+                                @SuppressWarnings("rawtypes")
+                                ClusterWorkerManager manager = new ClusterWorkerManager(
+                                        builtEngine,
                                         redis,
                                         mapper,
                                         properties.getCluster().getShards(),
@@ -67,11 +91,13 @@ public class LaminarAutoConfiguration {
                                 manager.start();
                                 resources.add(manager);
 
-                                // Return the Gateway that writes to Redis
-                                return new ClusterDispatcher(redis, mapper, properties.getCluster().getShards(),
+                                @SuppressWarnings("rawtypes")
+                                ClusterDispatcher dispatcher = new ClusterDispatcher(redis, mapper,
+                                        properties.getCluster().getShards(),
                                         handler.getEntityType());
+                                return dispatcher;
                             } else {
-                                return engine;
+                                return builtEngine;
                             }
                         }));
 
@@ -81,5 +107,89 @@ public class LaminarAutoConfiguration {
     @Bean
     public LaminarAspect laminarAspect(LaminarRegistry registry) {
         return new LaminarAspect(registry);
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "laminar.saga.enabled", havingValue = "true", matchIfMissing = true)
+    public com.nayem.laminar.saga.SagaStateRepository sagaStateRepository(
+            LaminarProperties properties,
+            org.springframework.beans.factory.ObjectProvider<StringRedisTemplate> redisTemplateProvider,
+            org.springframework.beans.factory.ObjectProvider<ObjectMapper> objectMapperProvider) {
+
+        String stateStore = properties.getSaga().getStateStore();
+        return switch (stateStore.toLowerCase()) {
+            case "memory" -> new com.nayem.laminar.saga.InMemorySagaStateRepository();
+            case "redis" -> {
+                StringRedisTemplate redis = redisTemplateProvider.getIfAvailable();
+                ObjectMapper mapper = objectMapperProvider.getIfAvailable();
+                if (redis == null || mapper == null) {
+                    throw new IllegalStateException("Redis and ObjectMapper are required for Redis Saga State Store");
+                }
+                yield new com.nayem.laminar.saga.RedisSagaStateRepository(redis, mapper);
+            }
+            default -> {
+                org.slf4j.LoggerFactory.getLogger(LaminarAutoConfiguration.class)
+                        .warn("Unknown saga state store '{}', falling back to memory", stateStore);
+                yield new com.nayem.laminar.saga.InMemorySagaStateRepository();
+            }
+        };
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "laminar.saga.enabled", havingValue = "true", matchIfMissing = true)
+    public com.nayem.laminar.saga.SagaMetrics sagaMetrics(
+            org.springframework.beans.factory.ObjectProvider<io.micrometer.core.instrument.MeterRegistry> registryProvider) {
+        return new com.nayem.laminar.saga.SagaMetrics(registryProvider.getIfAvailable());
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "laminar.saga.enabled", havingValue = "true", matchIfMissing = true)
+    public com.nayem.laminar.saga.SagaRecoveryLock sagaRecoveryLock(
+            LaminarProperties properties,
+            org.springframework.beans.factory.ObjectProvider<StringRedisTemplate> redisTemplateProvider) {
+
+        if (properties.getSaga().getRecovery().isDistributedLocking()) {
+            StringRedisTemplate redis = redisTemplateProvider.getIfAvailable();
+            if (redis == null) {
+                throw new IllegalStateException("Redis is required for Distributed Saga Recovery Lock");
+            }
+            return new com.nayem.laminar.saga.RedisSagaRecoveryLock(redis);
+        } else {
+            return new com.nayem.laminar.saga.NoOpSagaRecoveryLock();
+        }
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "laminar.saga.enabled", havingValue = "true", matchIfMissing = true)
+    public com.nayem.laminar.saga.SagaOrchestrator<?> sagaOrchestrator(
+            com.nayem.laminar.saga.SagaStateRepository stateRepository,
+            LaminarRegistry registry,
+            LaminarProperties properties,
+            com.nayem.laminar.saga.SagaMetrics sagaMetrics,
+            com.nayem.laminar.saga.SagaRecoveryLock recoveryLock,
+            org.springframework.beans.factory.ObjectProvider<ObjectMapper> objectMapperProvider) {
+
+        ObjectMapper mapper = objectMapperProvider.getIfAvailable();
+        if (mapper == null) {
+            mapper = new ObjectMapper();
+        }
+
+        return new com.nayem.laminar.saga.SagaOrchestrator<>(
+                stateRepository,
+                registry,
+                properties.getSaga().getRetry().getBackoff(),
+                properties.getSaga().getRetry().getMaxAttempts(),
+                properties.getSaga().getRetry().getJitterPercent(),
+                properties.getSaga().getRecovery(),
+                sagaMetrics,
+                recoveryLock,
+                mapper,
+                properties.getSaga().getTimeout());
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "laminar.saga.enabled", havingValue = "true", matchIfMissing = true)
+    public SagaAspect sagaAspect(com.nayem.laminar.saga.SagaOrchestrator<?> orchestrator) {
+        return new SagaAspect(orchestrator);
     }
 }

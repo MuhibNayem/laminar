@@ -15,11 +15,9 @@ public class ColdPartitionPerformanceTest {
 
         System.out.println("=== Benchmarking: " + requestCount + " requests ===");
 
-        // 1. Cold Partition Test (20k unique keys)
         long coldTime = runTest(requestCount, true);
         System.out.println("Cold Partition (Unique Keys): " + coldTime + "ms");
 
-        // 2. Hot Partition Test (1 key repeated)
         long hotTime = runTest(requestCount, false);
         System.out.println("Hot Partition (Single Key):   " + hotTime + "ms");
 
@@ -34,14 +32,13 @@ public class ColdPartitionPerformanceTest {
                 .loader(k -> 0)
                 .saver(e -> {
                     writeCount.incrementAndGet();
-                    // Simulate minimal DB latency (1ms)
                     try {
                         Thread.sleep(1);
                     } catch (Exception ex) {
                     }
                 })
-                .maxWaiters(count * 2) // Ensure no backpressure
-                .maxCachedWorkers(uniqueKeys ? count : 100) // Adjust cache for scenario
+                .maxWaiters(count * 2)
+                .maxCachedWorkers(uniqueKeys ? count : 100)
                 .build();
 
         List<CompletableFuture<Void>> futures = new ArrayList<>(count);

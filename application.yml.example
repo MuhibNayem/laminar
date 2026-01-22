@@ -6,6 +6,16 @@ laminar:
   # Default: 1000
   max-waiters: 10000
   
+  # Maximum batch size (number of waiters) per entity
+  # Prevents memory exhaustion from unbounded coalescing
+  # Default: 10000
+  max-batch-size: 50000
+  
+  # Maximum coalesce iterations before detecting cyclic coalescing
+  # Prevents infinite loops if mutation.coalesce(other) returns 'this' indefinitely
+  # Default: 1000
+  max-coalesce-iterations: 1000
+  
   # Timeout for database load/save operations
   # Default: 30s
   # Formats: 5s, 500ms, 1m, etc.
@@ -30,3 +40,28 @@ laminar:
   # Virtual thread name prefix for observability
   # Default: "laminar-worker-"
   thread-name-prefix: "my-app-worker-"
+
+  # Dead Letter Queue (DLQ) Configuration
+  dlq:
+    enabled: true
+    store: redis        # memory, redis
+    max-retries: 3      # Max retries before moving to DLQ (if using retriable mechanism)
+    ttl: 7d             # Retention period for DLQ entries
+
+  # Clustering Configuration
+  cluster:
+    enabled: false
+    shards: 16          # Number of Redis Stream shards (concurrent consumers)
+
+  # Saga Configuration
+  saga:
+    enabled: true
+    state-store: redis  # memory, redis
+    retry:
+      max-attempts: 3
+      backoff: 1s
+      jitter-percent: 0.5
+    recovery:
+      enabled: true
+      interval: 30s
+      distributed-locking: true

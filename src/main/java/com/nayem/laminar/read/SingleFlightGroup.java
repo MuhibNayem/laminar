@@ -2,6 +2,9 @@ package com.nayem.laminar.read;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.function.Supplier;
 
 /**
@@ -18,7 +21,8 @@ import java.util.function.Supplier;
  */
 public class SingleFlightGroup<V> {
 
-    private final ConcurrentHashMap<String, CompletableFuture<V>> flights = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, FlightFuture<V>> flights = new ConcurrentHashMap<>();
+    private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 
     /**
      * Executes the given function if, and only if, there is no other execution
@@ -41,28 +45,78 @@ public class SingleFlightGroup<V> {
      * @return A Future containing the result of the operation.
      */
     public CompletableFuture<V> doCall(String key, Supplier<V> supplier, java.time.Duration timeout) {
-        CompletableFuture<V> future = flights.computeIfAbsent(key, k -> {
-            CompletableFuture<V> newFuture = new CompletableFuture<>();
-            Thread.ofVirtual().start(() -> {
+        final java.util.Map<String, String> mdcContext = org.slf4j.MDC.getCopyOfContextMap();
+        final Object securityContext = SecurityContextAccessor.get();
+
+        FlightFuture<V> future = flights.computeIfAbsent(key, k -> {
+            FlightFuture<V> flight = new FlightFuture<>();
+
+            Future<?> task = executor.submit(() -> {
+                if (mdcContext != null) {
+                    org.slf4j.MDC.setContextMap(mdcContext);
+                }
+                SecurityContextAccessor.set(securityContext);
+
                 try {
                     V result = supplier.get();
-                    newFuture.complete(result);
-                } catch (Exception e) {
-                    newFuture.completeExceptionally(e);
+                    flight.complete(result);
+                } catch (Throwable e) {
+                    flight.completeExceptionally(e);
                 } finally {
-                    flights.remove(key, newFuture);
+                    org.slf4j.MDC.clear();
+                    SecurityContextAccessor.clear();
+                    flights.remove(key, flight);
                 }
             });
-
-            return newFuture;
+            
+            flight.setTask(task);
+            return flight;
         });
 
-        // Apply timeout if specified
         if (timeout != null) {
             return future.orTimeout(timeout.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
         }
 
         return future;
+    }
+
+    /**
+     * Helper to safely access Spring Security Context without hard runtime
+     * dependency.
+     */
+    private static class SecurityContextAccessor {
+        private static final boolean SPRING_SECURITY_PRESENT;
+
+        static {
+            boolean present = false;
+            try {
+                Class.forName("org.springframework.security.core.context.SecurityContextHolder");
+                present = true;
+            } catch (ClassNotFoundException e) {
+                present = false;
+            }
+            SPRING_SECURITY_PRESENT = present;
+        }
+
+        static Object get() {
+            if (!SPRING_SECURITY_PRESENT)
+                return null;
+            return org.springframework.security.core.context.SecurityContextHolder.getContext();
+        }
+
+        static void set(Object context) {
+            if (!SPRING_SECURITY_PRESENT || context == null)
+                return;
+            if (context instanceof org.springframework.security.core.context.SecurityContext sc) {
+                org.springframework.security.core.context.SecurityContextHolder.setContext(sc);
+            }
+        }
+
+        static void clear() {
+            if (!SPRING_SECURITY_PRESENT)
+                return;
+            org.springframework.security.core.context.SecurityContextHolder.clearContext();
+        }
     }
 
     /**
@@ -72,7 +126,7 @@ public class SingleFlightGroup<V> {
      * @return true if the request was cancelled, false if not in flight
      */
     public boolean cancel(String key) {
-        CompletableFuture<V> future = flights.remove(key);
+        FlightFuture<V> future = flights.remove(key);
         if (future != null) {
             return future.cancel(true);
         }
@@ -84,5 +138,29 @@ public class SingleFlightGroup<V> {
      */
     public boolean isInFlight(String key) {
         return flights.containsKey(key);
+    }
+
+    /**
+     * A CompletableFuture that holds a reference to the underlying execution task
+     * to allow propagation of cancellation (interruption).
+     */
+    private static class FlightFuture<V> extends CompletableFuture<V> {
+        private volatile Future<?> task;
+
+        void setTask(Future<?> task) {
+            this.task = task;
+            if (isCancelled()) {
+                task.cancel(true);
+            }
+        }
+
+        @Override
+        public boolean cancel(boolean mayInterruptIfRunning) {
+            boolean cancelled = super.cancel(mayInterruptIfRunning);
+            if (cancelled && task != null) {
+                task.cancel(mayInterruptIfRunning);
+            }
+            return cancelled;
+        }
     }
 }

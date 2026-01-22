@@ -2,36 +2,53 @@ variables:
   MAVEN_OPTS: "-Dmaven.repo.local=.m2/repository -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=WARN -Dorg.slf4j.simpleLogger.showDateTime=true -Djava.awt.headless=true"
   MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version -DinstallAtEnd=true -DdeployAtEnd=true"
 
-image: openjdk:25-jdk-slim
+image: eclipse-temurin:25.0.1_8-jdk
 
 cache:
   paths:
     - .m2/repository
 
 before_script:
-  - apt-get update && apt-get install -y maven
+  - chmod +x mvnw
+  - ./mvnw -version
   - java -version
-  - mvn -version
+  - |
+    if [ ! -z "$CI_COMMIT_TAG" ]; then
+      export VERSION=$CI_COMMIT_TAG
+    else
+      export PIPELINE_ID=${CI_PIPELINE_IID:-1}
+      export MAJOR=$((PIPELINE_ID / 251001))
+      export MINOR=$(((PIPELINE_ID / 501) % 501))
+      export PATCH=$((PIPELINE_ID % 501))
+      export VERSION="$MAJOR.$MINOR.$PATCH"
+    fi
+    echo "Setting version to $VERSION"
+    ./mvnw $MAVEN_CLI_OPTS versions:set -DnewVersion=$VERSION
 
 stages:
   - build
   - test
   - deploy
 
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH
+
 build:
   stage: build
   script:
-    - mvn $MAVEN_CLI_OPTS compile
+    - ./mvnw $MAVEN_CLI_OPTS compile
 
 test:
   stage: test
   script:
-    - mvn $MAVEN_CLI_OPTS test
+    - ./mvnw $MAVEN_CLI_OPTS test
 
 deploy:
   stage: deploy
   script:
-    - 'mvn $MAVEN_CLI_OPTS deploy -s ci_settings.xml'
+    - ./mvnw $MAVEN_CLI_OPTS deploy -s ci_settings.xml
   only:
-    - main
+    - dev
     - tags

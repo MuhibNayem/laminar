@@ -26,7 +26,6 @@ class ClusterSecurityTest {
 
     @Test
     void shouldRejectArbitraryClassDeserialization() throws Exception {
-        // Mock dependencies
         LaminarEngine<Object> engine = mock(LaminarEngine.class);
         StringRedisTemplate redisTemplate = mock(StringRedisTemplate.class);
         ObjectMapper objectMapper = new ObjectMapper();
@@ -37,10 +36,8 @@ class ClusterSecurityTest {
         when(redisTemplate.opsForStream()).thenReturn(streamOps);
         when(redisTemplate.opsForValue()).thenReturn(valueOps);
 
-        // Simulate lock acquisition
         when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(true);
 
-        // Prepare Malicious Payload
         MutationEnvelope envelope = new MutationEnvelope();
         envelope.setEntityKey("test-key");
         envelope.setMutationClass("java.lang.String");
@@ -48,13 +45,10 @@ class ClusterSecurityTest {
 
         String json = objectMapper.writeValueAsString(envelope);
 
-        // Fix Generics: Map<String, Object> keys, values
-        // MapRecord.create takes stream key, then Map.
         Map<Object, Object> data = Map.of("data", json);
 
         MapRecord<String, Object, Object> record = MapRecord.create("stream", data).withId(RecordId.of("1-0"));
 
-        // Disambiguate read method: explicitly use Consumer.class
         when(streamOps.read(any(Consumer.class), any(StreamReadOptions.class), any(StreamOffset.class)))
                 .thenReturn(Collections.singletonList(record))
                 .thenAnswer(invocation -> {
@@ -67,17 +61,12 @@ class ClusterSecurityTest {
 
         manager.start();
 
-        // Give it time to process
         Thread.sleep(500);
 
         manager.shutdown();
 
-        // VERIFICATION:
-        // 1. Engine should NOT have received any dispatch
         verify(engine, never()).dispatch(any());
 
-        // 2. Message should still be ACKed (we acknowledge invalid messages to skip
-        // them)
         verify(streamOps).acknowledge(anyString(), anyString(), eq(RecordId.of("1-0")));
     }
 }

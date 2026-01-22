@@ -17,8 +17,11 @@ public class LaminarRegistry implements org.springframework.beans.factory.Dispos
 
     @SuppressWarnings("unchecked")
     public <T> LaminarDispatcher<T> getDispatcher(Class<T> type) {
-        // Dispatcher lookup
         return (LaminarDispatcher<T>) dispatchers.get(type);
+    }
+
+    public java.util.List<AutoCloseable> getResources() {
+        return resources;
     }
 
     @Override

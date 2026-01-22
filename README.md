@@ -58,6 +58,34 @@ Laminar intercepts those 10,000 requests, **merges them into ONE** operation (+1
 
 ---
 
+## ⚠️ What Laminar Is NOT Designed For
+
+Laminar is **not** a replacement for traditional database transactions when you need atomic operations across **multiple different entities**.
+
+### Example: Bank Transfer
+
+```java
+// User wants to transfer $100 from Account A to Account B
+accountA.withdraw(100);  // Entity: Account A
+accountB.deposit(100);   // Entity: Account B
+```
+
+This requires both operations to succeed or fail together (atomicity). If `withdraw` succeeds but `deposit` fails, you lose money.
+
+### Why Laminar Doesn't Fit Here
+
+- `getEntityKey()` in a `Mutation` returns a **single key** (e.g., `accountId`).
+- Laminar batches mutations **per entity key**, so Account A and Account B would be processed in separate, independent batches.
+- There's no built-in mechanism to coordinate a transaction spanning multiple entity keys.
+
+### For Multi-Entity Atomicity, Use:
+
+- **Traditional `@Transactional`** database transactions
+- **Saga patterns** (for distributed systems)
+- **Two-Phase Commit (2PC)**
+
+---
+
 ## 📦 Installation
 
 **Requirements**: Java 25 + Spring Boot 4.0.1 + Redis (optional, for clustering)
@@ -68,6 +96,30 @@ Laminar intercepts those 10,000 requests, **merges them into ONE** operation (+1
     <artifactId>Laminar</artifactId>
     <version>0.0.1-SNAPSHOT</version>
 </dependency>
+```
+
+### Gradle
+
+Add the GitLab repository and dependency to your `build.gradle`:
+
+```groovy
+repositories {
+    mavenCentral()
+    maven {
+        url "https://gitlab.bracits.com/api/v4/projects/1494/packages/maven"
+        credentials(HttpHeaderCredentials) {
+            name = 'Private-Token'
+            value = "YOUR_PERSONAL_ACCESS_TOKEN" // Or System.getenv("GITLAB_TOKEN")
+        }
+        authentication {
+            header(HttpHeaderAuthentication)
+        }
+    }
+}
+
+dependencies {
+    implementation 'com.nayem:Laminar:0.0.1-SNAPSHOT'
+}
 ```
 
 ---
@@ -84,6 +136,143 @@ Laminar supports **Distributed Linearization** through a sharded worker model us
 
 ### Setup
 Add the Redis starter to your project:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-data-redis</artifactId>
+</dependency>
+```
+
+And configure:
+
+```yaml
+laminar:
+  cluster:
+    enabled: true
+    shards: 32 # Higher concurrency, more Redis connection usage
+```
+
+---
+
+## 🔄 Multi-Entity Transactions (Saga Pattern)
+
+For operations spanning multiple entities (e.g., money transfer between accounts), Laminar provides a robust **Saga** implementation. This ensures reliability even in distributed systems by using a "Execute -> Compensate" workflow.
+
+### Features
+- **Request Coalescing**: Saga steps are dispatched to the Laminar Engine and **batched atomically** with other mutations.
+- **Guaranteed Atomicity**: Eventually consistent via compensation.
+- **Crash Recovery**: Automatically resumes interrupted sagas on startup.
+- **Deadlock Prevention**: Automatically orders locks to prevent deadlocks.
+- **Idempotency**: Built-in protection against duplicate execution.
+
+### Usage
+
+1. **Define a Saga**:
+
+```java
+@Service
+public class TransferService {
+
+    @DispatchSaga
+    public LaminarSaga<Account> transfer(String fromId, String toId, BigDecimal amount) {
+        return new TransferSaga(fromId, toId, amount);
+    }
+}
+```
+
+2. **Implement the Saga & Steps**:
+
+```java
+public class TransferSaga implements LaminarSaga<Account> {
+    // ... constructor ...
+
+    @Override
+    public List<SagaStep<Account>> getSteps() {
+        return List.of(
+            new DebitStep(fromId, amount),
+            new CreditStep(toId, amount)
+        );
+    }
+}
+
+public class DebitStep implements SagaStep<Account> {
+    @Override
+    public Account execute(Account account) {
+        account.withdraw(amount);
+        return account; // Return state for compensation logic
+    }
+
+    @Override
+    public void compensate(Account account, Account previousState) {
+        account.deposit(amount); // Reverse the operation
+    }
+}
+```
+
+### Configuration
+
+```yaml
+laminar:
+  saga:
+    enabled: true
+    state-store: memory # 'memory' (default) or 'redis'
+    retry:
+      max-attempts: 5
+      backoff: 2s
+    recovery:
+      enabled: true
+      interval: 1m
+```
+
+### Reducing Boilerplate with Functional APIs
+
+For simple sagas, use `SagaBuilder` and `FunctionalSagaStep` to avoid creating separate classes:
+
+```java
+@Service
+public class TransferService {
+
+    @DispatchSaga
+    public LaminarSaga<Account> transfer(String fromId, String toId, BigDecimal amount) {
+        return SagaBuilder.<Account>newSaga("transfer-" + UUID.randomUUID(), Account.class)
+            .description("Transfer " + amount + " from " + fromId + " to " + toId)
+            .step(FunctionalSagaStep.<Account>builder()
+                .stepId("debit-" + fromId)
+                .entityKey(fromId)
+                .execute(account -> {
+                    account.withdraw(amount);
+                    return account;
+                })
+                .compensate((account, prev) -> account.deposit(amount))
+                .build())
+            .step(FunctionalSagaStep.<Account>builder()
+                .stepId("credit-" + toId)
+                .entityKey(toId)
+                .execute(account -> {
+                    account.deposit(amount);
+                    return account;
+                })
+                .compensate((account, prev) -> account.withdraw(amount))
+                .build())
+            .onSuccess(() -> log.info("Transfer completed"))
+            .onFailure(e -> log.error("Transfer failed", e))
+            .build();
+    }
+}
+```
+
+Similarly, use `FunctionalMutation` for simple mutations:
+
+```java
+// Instead of creating a separate XpMutation class:
+FunctionalMutation<User> mutation = FunctionalMutation.of(
+    userId,
+    user -> user.addXp(50)
+);
+```
+
+For Redis-backed saga state (required for production):
 ```xml
 <dependency>
     <groupId>org.springframework.boot</groupId>
@@ -97,6 +286,28 @@ laminar:
   cluster:
     enabled: true
     shards: 32 # Higher shards = better distribution across many nodes
+```
+
+---
+
+## 🗑️ Dead Letter Queue (DLQ)
+
+Laminar provides a **Dead Letter Queue** to safely capture mutations that fail repeatedly, ensuring data integrity even in the face of unrecoverable errors (e.g., bad data, schema violations).
+
+### Features
+- **Automatic Capture**: Mutations are moved to DLQ after exhausting retries.
+- **Context Preservation**: Stores exception message, stack trace type, and original payload.
+- **Pluggable Storage**:
+  - `memory`: Lightweight, development-only (cleared on restart).
+  - `redis`: Durable storage using `StringRedisTemplate`.
+
+### Enable DLQ
+```yaml
+laminar:
+  dlq:
+    enabled: true
+    store: redis    # 'memory' or 'redis'
+    ttl: 7d         # Retention period
 ```
 
 ---
@@ -130,6 +341,48 @@ public class XpMutation implements Mutation<User> {
     }
 }
 ```
+
+**Optional: Add Versioning for Safe Schema Evolution**
+
+For mutations used in cluster mode, implement `VersionedMutation` to enable zero-downtime schema changes:
+
+```java
+public class XpMutation implements Mutation<User>, VersionedMutation {
+    private final String userId;
+    private final long amount;
+    private final String reason; // Added in v2
+
+    @Override
+    public int getVersion() {
+        return 2; // Increment when schema changes
+    }
+
+    @Override
+    public String getEntityKey() {
+        return userId;
+    }
+
+    @Override
+    public Mutation<User> coalesce(Mutation<User> other) {
+        if (other instanceof XpMutation next) {
+            return new XpMutation(userId, this.amount + next.amount, reason);
+        }
+        return other;
+    }
+
+    @Override
+    public void apply(User user) {
+        user.addXp(amount, reason);
+    }
+}
+```
+
+**⚠️ Coalescing Best Practices:**
+- **Never return 'this' repeatedly**: Causes cyclic coalescing detection
+- **Keep coalesce() fast**: Avoid DB calls or expensive operations
+- **Test merge logic**: Ensure correctness under high concurrency
+
+See [Migration Guide](OPERATIONS.md#migration-guide) for schema versioning strategies.
 
 ### 2. Spring Boot Integration (Step-by-Step)
 
@@ -320,6 +573,10 @@ laminar:
   # Backpressure: Max pending requests per entity worker
   max-waiters: 10000                  # Default: 1000
   
+  # Safety: Batch size and coalescing limits
+  max-batch-size: 50000               # Default: 10000 (prevents memory exhaustion)
+  max-coalesce-iterations: 1000       # Default: 1000 (detects cyclic coalescing)
+  
   # Resilience: Timeout for load/save operations
   timeout: 5s                         # Default: 30s
   
@@ -335,7 +592,33 @@ laminar:
   
   # Observability: Thread naming for monitoring
   thread-name-prefix: "game-worker-"  # Default: "laminar-worker-"
+
+  # Clustering (Optional)
+  cluster:
+    enabled: true
+    shards: 16                        # Concurrent Redis Stream consumers
+
+  # Saga (Multi-Entity Transactions)
+  saga:
+    enabled: true
+    state-store: redis                # Persistence for recovery
+    retry:
+      max-attempts: 3
+      backoff: 1s
+    recovery:
+      enabled: true
+      interval: 30s                   # frequency of crash recovery scans
+
+  # Dead Letter Queue
+  dlq:
+    enabled: true
+    store: redis
+    ttl: 7d                           # Automatic cleanup after 7 days
 ```
+
+**New Safety Features:**
+- **`max-batch-size`**: Prevents memory bombs from unbounded coalescing
+- **`max-coalesce-iterations`**: Detects if `mutation.coalesce(other)` returns 'this' indefinitely
 
 ### Programmatic Configuration (Non-Spring)
 
@@ -345,6 +628,8 @@ LaminarEngine<User> engine = LaminarEngine.<User>builder()
     .saver(user -> userRepo.save(user))
     .timeout(Duration.ofSeconds(5))
     .maxWaiters(50_000)
+    .maxBatchSize(100_000)              // NEW: Batch size limit
+    .maxCoalesceIterations(1000)        // NEW: Cyclic coalescing detection
     .maxCachedWorkers(100_000)
     .threadNamePrefix("user-worker-")
     .metrics(meterRegistry)
@@ -376,38 +661,135 @@ From `LaminarLoadTest` (100K concurrent requests):
 
 ### Architecture
 
+### Architecture
+
+Laminar is designed as a layered system composed of three main subsystems: the **Core Coalescing Engine**, the **Saga Orchestrator**, and the **Cluster Manager**.
+
+```mermaid
+graph TD
+    %% Clients
+    Client([Client Request])
+
+    %% Spring Integration Layer
+    subgraph "Spring Integration Layer"
+        AOP_Core["LaminarAspect<br/>(@Dispatch)"]
+        AOP_Saga["SagaAspect<br/>(@DispatchSaga)"]
+    end
+
+    Client --> AOP_Core
+    Client --> AOP_Saga
+
+    %% Saga Subsystem
+    subgraph "Saga Subsystem"
+        Orchestrator[SagaOrchestrator]
+        SagaStore[(Saga State Store<br/>Redis/Memory)]
+        Recovery[Crash Recovery]
+    end
+
+    AOP_Saga --> Orchestrator
+    Orchestrator <--> SagaStore
+    Orchestrator -.->|Resume| Recovery
+
+    %% Core Engine
+    subgraph "Laminar Core Engine"
+        Router["LaminarEngine<br/>(Router)"]
+        WorkerPool["Worker Pool<br/>(Caffeine Cache)"]
+        
+        subgraph "Virtual Thread Actor"
+            Worker[EntityWorker]
+            Batch[CoalescingBatch]
+        end
+    end
+
+    AOP_Core --> Router
+    Orchestrator -->|Execute Step| Router
+    Orchestrator -->|Compensate| Router
+
+    Router -->|Get/Create| WorkerPool
+    WorkerPool --> Worker
+    Worker -->|Accumulate| Batch
+
+    %% Cluster Layer
+    subgraph "Cluster Layer (Optional)"
+        RedisStream(Redis Streams<br/>Sharded Work Queue)
+        ClusterMgr[ClusterWorkerManager]
+    end
+
+    Router -.->|If Clustered| RedisStream
+    RedisStream -.->|Consume| ClusterMgr
+    ClusterMgr --> Router
+
+    %% Persistence
+    subgraph "Persistence"
+        DB[(Primary Database)]
+    end
+
+    Batch -->|Load-Apply-Save| DB
 ```
-┌─────────────┐
-│   Request   │
-│   (Mutation)│
-└──────┬──────┘
-       │
-       ▼
-┌─────────────────────┐
-│ LaminarAspect (AOP) │  ← Intercepts @Dispatch
-└──────┬──────────────┘
-       │
-       ▼
-┌─────────────────────┐
-│  LaminarEngine      │  ← Routes by entityKey
-└──────┬──────────────┘
-       │
-       ▼
-┌─────────────────────┐
-│  EntityWorker       │  ← Virtual Thread Actor
-│  (Per Entity Key)   │
-└──────┬──────────────┘
-       │
-       ▼
-┌─────────────────────┐
-│ CoalescingBatch     │  ← Merges concurrent requests
-└──────┬──────────────┘
-       │
-       ▼
-┌─────────────────────┐
-│  Load → Apply → Save│  ← Single atomic operation
-└─────────────────────┘
+
+#### Detailed View (ASCII)
+
 ```
+                                 ┌──────────────┐
+                                 │ Client Req   │
+                                 └──────┬───────┘
+                                        │
+                 ┌──────────────────────┴──────────────────────┐
+                 ▼                                             ▼
+       ┌─────────────────────┐                       ┌────────────────────┐
+       │    LaminarAspect    │                       │     SagaAspect     │
+       │     (@Dispatch)     │                       │   (@DispatchSaga)  │
+       └─────────┬───────────┘                       └─────────┬──────────┘
+                 │                                             │
+                 │                                   ┌─────────▼──────────┐
+                 │                                   │  SagaOrchestrator  │◄──┐
+                 │                                   └─────────┬──────────┘   │
+                 │                                             │           ┌──┴──────┐
+                 │                                             │           │SagaState│
+                 ▼                                             ▼           └─────────┘
+       ┌──────────────────────────────────────────────────────────────────┐
+       │                       Laminar Core Engine                        │
+       │                                                                  │
+       │  ┌──────────────┐       ┌──────────────┐       ┌──────────────┐  │
+       │  │ LaminarRouter│──────►│  WorkerPool  │──────►│ EntityWorker │  │
+       │  └──────┬───────┘       └──────────────┘       │   (Virtual)  │  │
+       │         │                                      └──────┬───────┘  │
+       │       (If Clustered)                                  │          │
+       │         │                                             ▼          │
+       │         ▼                                      ┌──────────────┐  │
+       │  ┌─────────────┐                               │  Coalescing  │  │
+       │  │Redis Streams│                               │    Batch     │  │
+       │  └──────┬──────┘                               └──────┬───────┘  │
+       │         │                                             │          │
+       │         ▼                                             │          │
+       │  ┌─────────────┐                                      │          │
+       │  │ClusterMgr   │                                      │          │
+       │  └──────┬──────┘                                      │          │
+       │         │                                             │          │
+       │         ▼                                             │          │
+       │  (To Router)                                          │          │
+       └───────────────────────────────────────────────────────┼──────────┘
+                                                               │
+                                                               ▼
+                                                      ┌──────────────────┐
+                                                      │ Primary Database │
+                                                      └──────────────────┘
+```
+
+### Component Breakdown
+
+1.  **Core Engine**: Handles strict linearization and coalescing.
+    *   **LaminarEngine**: The entry point. Routes mutations to local workers or the cluster layer.
+    *   **EntityWorker**: A lightweight "Actor" running on a **Virtual Thread**. It processes one batch at a time for a specific entity key.
+    *   **CoalescingBatch**: The "accumulator". It merges incoming mutations using your custom `coalesce()` logic while the worker is busy IO-waiting.
+
+2.  **Saga Orchestrator**: Manages multi-step, multi-entity transactions.
+    *   **Orchestrator**: Executes steps sequentially. If a step fails, it executes compensating actions in reverse order.
+    *   **Saga State Store**: Persists the progress of every saga (steps completed, results) to Redis to survive application crashes.
+
+3.  **Cluster Layer**: Enables horizontal scaling.
+    *   **Redis Streams**: Acts as a partitioned log. Mutations are hashed to shards (e.g., shard 0-31).
+    *   **ClusterWorkerManager**: Ensures each shard is consumed by exactly one node in the cluster (via distributed locks), maintaining global linearization.
 
 ### Execution Flow
 
@@ -526,6 +908,131 @@ Automatically exposes:
 - `laminar.requests{entity=User}` - Counter
 - `laminar.batch.process{entity=User}` - Counter
 - `laminar.shutdown.forced{remaining_workers=5}` - Counter
+
+---
+
+## 📚 Operations & Monitoring
+
+See [**OPERATIONS.md**](OPERATIONS.md) for the complete operational runbook.
+
+### 📋 Comprehensive Operational Guides
+
+| Section | What You'll Learn |
+|---------|-------------------|
+| [**Failure Scenarios**](OPERATIONS.md#common-failure-scenarios) | Split-brain recovery, network partitions, cascading failures |
+| [**Performance Tuning**](OPERATIONS.md#performance-tuning-guide) | JVM flags for 100K+ workers, heap sizing, Redis optimization |
+| [**Migration Guide**](OPERATIONS.md#migration-guide) | Zero-downtime mutation schema versioning |
+| [**Recovery Troubleshooting**](OPERATIONS.md#recovery-troubleshooting) | Diagnose stuck sagas, lock issues, compensation failures |
+| [**Monitoring & Alerts**](OPERATIONS.md#monitoring-and-alerting) | Prometheus queries, Grafana dashboards, alert thresholds |
+
+### 🎯 Quick Performance Reference
+
+**For 100K Workers / 500K req/sec:**
+
+```bash
+# JVM Configuration (Java 25+)
+-Xms8g -Xmx8g 
+--enable-preview
+-Djdk.virtualThreadScheduler.parallelism=16
+-Djdk.virtualThreadScheduler.maxPoolSize=256
+-XX:+UseZGC
+-XX:MaxDirectMemorySize=2g
+```
+
+```yaml
+# Application Configuration
+laminar:
+  max-waiters: 50000
+  max-cached-workers: 200000
+  worker-eviction-time: 5m
+  cluster:
+    enabled: true
+    shards: 64
+
+spring:
+  redis:
+    lettuce:
+      pool:
+        max-active: 50
+```
+
+**Heap Sizing Formula:**
+```
+Heap = (Active Workers × 50KB) + (Sagas × 5KB) + 1GB overhead
+
+Example: 100K workers + 1K sagas = ~6GB (recommend 8GB)
+```
+
+See [**Performance Tuning Guide**](OPERATIONS.md#performance-tuning-guide) for comprehensive configuration.
+
+### 📊 Key Metrics
+
+| Metric | Type | Description | Healthy Range |
+|--------|------|-------------|---------------|
+| `laminar.saga.active{status}` | Gauge | Active sagas by status | RUNNING < 100 |
+| `laminar.saga.duration` | Timer | Saga execution time | p95 < 5s |
+| `laminar.batch.process` | Counter | Coalesced batches | Increasing |
+| `laminar.saga.compensation.count` | Counter | Compensations triggered | <1% of sagas |
+| `laminar.saga.timeout.count` | Counter | Saga timeouts | 0 |
+| `laminar.recovery.attempts` | Counter | Recovery attempts | Low |
+| `laminar.requests` | Counter | Total requests | High throughput |
+
+### 🔧 Health Checks
+
+Laminar integrates with **Spring Boot Actuator**:
+
+```bash
+# Overall health
+curl http://localhost:8080/actuator/health
+
+# Detailed Redis health
+curl http://localhost:8080/actuator/health/redis
+
+# Metrics endpoint
+curl http://localhost:8080/actuator/metrics/laminar.saga.active
+```
+
+### 🚨 Critical Failure Scenarios
+
+**1. Split-Brain During Recovery**
+- **Symptom:** Multiple instances recovering same saga
+- **Fix:** Enable `laminar.saga.recovery.distributed-locking: true`
+- [**Full Guide →**](OPERATIONS.md#scenario-1-split-brain-during-recovery)
+
+**2. Network Partition with Redis**
+- **Symptom:** All sagas frozen, connection errors
+- **Fix:** Use Redis Sentinel/Cluster for HA
+- [**Full Guide →**](OPERATIONS.md#scenario-2-network-partition-between-app-and-redis)
+
+**3. Cascading Saga Failures**
+- **Symptom:** >50% failure rate, compensation storm
+- **Fix:** Implement circuit breakers on saga steps
+- [**Full Guide →**](OPERATIONS.md#scenario-6-cascading-saga-failures-due-to-downstream-service-outage)
+
+### 🔄 Migration & Versioning
+
+**Zero-Downtime Mutation Schema Changes:**
+
+```java
+// Add versioning to mutations
+public abstract class VersionedMutation<T> implements Mutation<T> {
+    @JsonProperty("_version")
+    private int version = 1;
+}
+
+// Create adapters for backward compatibility
+public class TransferMutationAdapter {
+    public TransferMutation deserialize(String json) {
+        int version = extractVersion(json);
+        return switch (version) {
+            case 1 -> migrateV1toV2(json);
+            case 2 -> deserializeV2(json);
+        };
+    }
+}
+```
+
+See [**Migration Guide**](OPERATIONS.md#migration-guide) for complete versioning strategies.
 
 ---
 

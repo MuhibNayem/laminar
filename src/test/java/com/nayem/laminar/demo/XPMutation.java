@@ -22,10 +22,9 @@ public class XPMutation implements Mutation<AtomicLong> {
     public Mutation<AtomicLong> coalesce(Mutation<AtomicLong> other) {
         if (other instanceof XPMutation) {
             XPMutation o = (XPMutation) other;
-            // Coalesce: Merge two adds into one bigger add
             return new XPMutation(userId, this.xpToAdd + o.xpToAdd);
         }
-        return other; // Should not happen in this simple demo
+        return other;
     }
 
     @Override

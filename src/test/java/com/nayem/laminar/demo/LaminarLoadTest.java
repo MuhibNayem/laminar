@@ -31,6 +31,7 @@ public class LaminarLoadTest {
                     }
                 })
                 .maxWaiters(150_000)
+                .maxBatchSize(200_000) // Allow large batches for load testing
                 .build();
 
         int REQUEST_COUNT = 150_000;

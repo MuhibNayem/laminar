@@ -12,7 +12,6 @@ public class SingleFlightTest {
         SingleFlightGroup<String> singleFlight = new SingleFlightGroup<>();
         AtomicInteger callCount = new AtomicInteger(0);
 
-        // Slow supplier that simulates DB fetch
         java.util.function.Supplier<String> expensiveOp = () -> {
             try {
                 Thread.sleep(100);
@@ -23,7 +22,6 @@ public class SingleFlightTest {
             return "Result";
         };
 
-        // Fire 100 concurrent requests
         int THREADS = 100;
         CompletableFuture<?>[] futures = new CompletableFuture[THREADS];
 
@@ -31,11 +29,8 @@ public class SingleFlightTest {
             futures[i] = singleFlight.doCall("key_1", expensiveOp);
         }
 
-        // Wait for all
         CompletableFuture.allOf(futures).join();
 
-        // Verification:
-        // Although 100 requests were made, the Supplier should have run exactly ONCE.
         assertEquals(1, callCount.get(), "Supplier should have only executed once");
     }
 }
