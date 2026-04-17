@@ -3,6 +3,8 @@ package com.nayem.laminar.dlq;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nayem.laminar.core.Mutation;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -31,13 +33,20 @@ public class RedisDeadLetterQueue<T> implements DeadLetterQueue<T> {
     private final ObjectMapper objectMapper;
     private final String entityType;
     private final Duration entryTtl;
+    private final DlqMetrics metrics;
 
     public RedisDeadLetterQueue(StringRedisTemplate redisTemplate, ObjectMapper objectMapper,
             Class<T> entityType, Duration entryTtl) {
+        this(redisTemplate, objectMapper, entityType, entryTtl, null);
+    }
+    
+    public RedisDeadLetterQueue(StringRedisTemplate redisTemplate, ObjectMapper objectMapper,
+            Class<T> entityType, Duration entryTtl, MeterRegistry meterRegistry) {
         this.redisTemplate = redisTemplate;
         this.objectMapper = objectMapper;
         this.entityType = entityType.getName();
         this.entryTtl = entryTtl;
+        this.metrics = meterRegistry != null ? new MicrometerDlqMetrics(meterRegistry, entityType.getName()) : DlqMetrics.NO_OP;
     }
 
     private String queueKey() {
@@ -57,6 +66,7 @@ public class RedisDeadLetterQueue<T> implements DeadLetterQueue<T> {
             redisTemplate.opsForList().rightPush(queueKey(), json);
             redisTemplate.opsForValue().set(indexKey(entry.id()), json, entryTtl);
 
+            metrics.recordSend();
             log.warn("Mutation sent to Redis DLQ: entityKey={}, error={}, retryCount={}",
                     entry.entityKey(), entry.errorMessage(), entry.retryCount());
         } catch (JsonProcessingException e) {
@@ -74,17 +84,38 @@ public class RedisDeadLetterQueue<T> implements DeadLetterQueue<T> {
     public Optional<DlqEntry<T>> poll() {
         String json = redisTemplate.opsForList().leftPop(queueKey());
         Optional<DlqEntry<T>> entry = deserialize(json);
-        entry.ifPresent(e -> redisTemplate.delete(indexKey(e.id())));
+        entry.ifPresent(e -> {
+            redisTemplate.delete(indexKey(e.id()));
+            metrics.recordPoll();
+        });
         return entry;
     }
 
     @Override
     public void acknowledge(String entryId) {
-        String json = redisTemplate.opsForValue().get(indexKey(entryId));
+        String indexKey = indexKey(entryId);
+        String json = redisTemplate.opsForValue().get(indexKey);
         if (json != null) {
-            redisTemplate.opsForList().remove(queueKey(), 1, json);
-            redisTemplate.delete(indexKey(entryId));
-            log.info("Redis DLQ entry acknowledged: id={}", entryId);
+            // Use Redis WATCH/MULTI/EXEC for atomic check-and-delete operation
+            // This prevents race conditions where multiple consumers acknowledge simultaneously
+            Boolean acknowledged = redisTemplate.execute(connection -> {
+                connection.watch(indexKey.getBytes());
+                String currentValue = redisTemplate.opsForValue().get(indexKey);
+                if (currentValue == null || !currentValue.equals(json)) {
+                    connection.unwatch();
+                    return false;
+                }
+                connection.multi();
+                connection.del(indexKey.getBytes());
+                connection.lRemove(queueKey().getBytes(), 1, json.getBytes());
+                var results = connection.exec();
+                return results != null && !results.isEmpty();
+            }, false);
+            
+            if (Boolean.TRUE.equals(acknowledged)) {
+                metrics.recordAcknowledge();
+                log.info("Redis DLQ entry acknowledged: id={}", entryId);
+            }
         }
     }
 
@@ -105,6 +136,11 @@ public class RedisDeadLetterQueue<T> implements DeadLetterQueue<T> {
                 .filter(Optional::isPresent)
                 .map(Optional::get)
                 .collect(Collectors.toList());
+    }
+
+    @Override
+    public DlqMetrics getMetrics() {
+        return metrics;
     }
 
     private Optional<DlqEntry<T>> deserialize(String json) {
@@ -168,5 +204,46 @@ public class RedisDeadLetterQueue<T> implements DeadLetterQueue<T> {
             int retryCount,
             long timestamp,
             Long lastRetryTimestamp) {
+    }
+    
+    /**
+     * Micrometer-based metrics implementation for DLQ operations.
+     */
+    private static class MicrometerDlqMetrics implements DlqMetrics {
+        private final Counter sendCounter;
+        private final Counter pollCounter;
+        private final Counter acknowledgeCounter;
+        
+        MicrometerDlqMetrics(MeterRegistry meterRegistry, String entityType) {
+            this.sendCounter = Counter.builder("laminar.dlq.send")
+                    .tag("entity", entityType)
+                    .description("Number of mutations sent to DLQ")
+                    .register(meterRegistry);
+                    
+            this.pollCounter = Counter.builder("laminar.dlq.poll")
+                    .tag("entity", entityType)
+                    .description("Number of mutations polled from DLQ")
+                    .register(meterRegistry);
+                    
+            this.acknowledgeCounter = Counter.builder("laminar.dlq.acknowledge")
+                    .tag("entity", entityType)
+                    .description("Number of DLQ entries acknowledged")
+                    .register(meterRegistry);
+        }
+        
+        @Override
+        public void recordSend() {
+            sendCounter.increment();
+        }
+        
+        @Override
+        public void recordPoll() {
+            pollCounter.increment();
+        }
+        
+        @Override
+        public void recordAcknowledge() {
+            acknowledgeCounter.increment();
+        }
     }
 }
