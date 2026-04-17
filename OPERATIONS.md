@@ -1283,6 +1283,133 @@ curl -s http://localhost:8080/actuator/metrics/laminar.saga.step.execution | \
 
 ---
 
+## New Features Operations Guide
+
+### Rate Limiter Operations
+
+#### Token Bucket Configuration
+```yaml
+laminar:
+  ratelimit:
+    token-bucket:
+      enabled: true
+      default-rate: 100        # requests per second
+      default-capacity: 200    # burst capacity
+```
+
+#### Sliding Window Configuration
+```yaml
+laminar:
+  ratelimit:
+    sliding-window:
+      enabled: true
+      default-max-requests: 1000
+      default-window-size: 60s
+```
+
+#### Monitoring Rate Limiting
+```bash
+# Check rate limit stats via actuator
+curl http://localhost:8080/actuator/metrics/laminar.ratelimit.count
+
+# View rejection rate by key
+curl http://localhost:8080/actuator/metrics/laminar.ratelimit.count | \
+  jq '.measurements[] | select(.tag.key == \"allowed\" and .tag.value == \"false\")'
+```
+
+### Circuit Breaker Operations
+
+#### Configuration
+```yaml
+laminar:
+  resilience:
+    circuit-breaker:
+      enabled: true
+      default-failure-threshold: 5
+      default-success-threshold: 3
+      default-timeout: 30s
+```
+
+#### Manual Circuit Control
+```bash
+# Check circuit breaker state
+curl http://localhost:8080/actuator/metrics/laminar.circuitbreaker.state.change
+
+# Force open a circuit (for maintenance)
+# Use LaminarAdminEndpoint or JMX
+```
+
+#### Troubleshooting Circuit Breakers
+**Symptoms:** High failure rate, services failing fast
+
+**Diagnosis:**
+1. Check circuit breaker state metrics
+2. Review logs for `CircuitBreakerOpenException`
+3. Verify downstream service health
+
+**Resolution:**
+```yaml
+# Temporarily increase thresholds during incidents
+laminar:
+  resilience:
+    circuit-breaker:
+      failure-threshold: 10
+      timeout: 60s
+```
+
+### Priority Queue Operations
+
+#### Configuration
+```yaml
+laminar:
+  worker:
+    priority-enabled: true
+    priority-levels: 10  # Default: 1-10 scale
+```
+
+#### Monitoring Priority Processing
+```bash
+# Check processing latency by priority
+curl http://localhost:8080/actuator/metrics/laminar.mutation.duration | \
+  jq '.tags[] | select(.tag == \"priority\")'
+```
+
+### Telemetry Operations
+
+#### OpenTelemetry Configuration
+```yaml
+laminar:
+  telemetry:
+    enabled: true
+    export:
+      prometheus:
+        enabled: true
+      otlp:
+        enabled: true
+        endpoint: http://tempo:4317
+        headers:
+          authorization: "Bearer ${OTEL_AUTH_TOKEN}"
+```
+
+#### Available Metrics
+| Metric | Type | Description |
+|--------|------|-------------|
+| `laminar.mutation.duration` | Timer | Mutation processing time with percentiles |
+| `laminar.mutation.count` | Counter | Total mutations processed |
+| `laminar.batch.size` | DistributionSummary | Coalescing efficiency |
+| `laminar.ratelimit.count` | Counter | Rate limiting events |
+| `laminar.circuitbreaker.state.change` | Counter | Circuit transitions |
+| `laminar.saga.duration` | Timer | Saga execution times |
+| `laminar.dlq.event` | Counter | DLQ operations |
+
+#### Distributed Tracing
+All Laminar operations include trace context propagation:
+- Trace ID in MDC for logging correlation
+- Span attributes for entity type, operation, status
+- Parent spans for batch processing
+
+---
+
 ## Emergency Procedures
 
 ### Disable Saga Processing
@@ -1307,6 +1434,15 @@ kill -TERM <pid>
 tail -f application.log | grep "Shutting down"
 ```
 
+### Emergency Rate Limit Bypass
+```java
+// In extreme cases, temporarily disable rate limiting
+@Autowired
+private LaminarProperties properties;
+
+properties.getRatelimit().setEnabled(false);
+```
+
 ---
 
 ## Support Contacts
@@ -1320,3 +1456,6 @@ tail -f application.log | grep "Shutting down"
 - [Laminar GitHub Repository](https://github.com/your-org/laminar)
 - [Saga Pattern Documentation](https://microservices.io/patterns/data/saga.html)
 - [Production Incident Postmortems](link-to-incidents)
+- [Rate Limiting Best Practices](https://docs.laminar.dev/ratelimiting)
+- [Circuit Breaker Patterns](https://docs.laminar.dev/circuit-breaker)
+- [OpenTelemetry Integration Guide](https://docs.laminar.dev/telemetry)

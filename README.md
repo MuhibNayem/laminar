@@ -1,6 +1,6 @@
 # Laminar: Production-Grade Request Coalescing Engine
 
-**Laminar** is a **production-ready Request Coalescing & Linearization Engine** for Java 25. It solves the "Hot Partition" problem in high-scale systems (Discord, Twitch, Trading platforms) by treating entities as single-threaded Actors and merging operations *before* they reach the database.
+**Laminar** is a **production-ready Request Coalescing & Linearization Engine** for Java 25+. It solves the "Hot Partition" problem in high-scale systems (Discord, Twitch, Trading platforms, EdTech) by treating entities as single-threaded Actors and merging operations *before* they reach the database.
 
 ---
 
@@ -35,20 +35,29 @@ Laminar intercepts those 10,000 requests, **merges them into ONE** operation (+1
 - **Read Coalescing**: `SingleFlightGroup` prevents thundering herd
 - **Linearization**: Strict ordering per entity key
 - **Fire-and-Forget**: `@Dispatch` annotation for seamless integration
+- **Priority Queues**: SLA-based processing with priority levels (1-10)
 
-### ✅ Resilience
+### ✅ Resilience Patterns
+- **Token Bucket Rate Limiter**: High-throughput rate limiting with burst support
+- **Sliding Window Rate Limiter**: Precise rate limiting for fair resource usage
+- **Circuit Breaker**: Prevents cascading failures with automatic recovery
 - **Configurable Timeouts**: Default 30s, prevents DB hangs
 - **Backpressure**: Reject excess requests when capacity exceeded
 - **Graceful Shutdown**: Drain all pending mutations before exit
 - **Error Handling**: Configurable error callbacks
 
-### ✅ Observability
+### ✅ Observability & Telemetry
+- **OpenTelemetry Integration**: Distributed tracing via Micrometer bridge
 - **Micrometer Metrics**: Auto-wired to Spring Boot Actuator
-  - `laminar.requests` - Total mutations dispatched
-  - `laminar.batch.process` - Batch processing (tagged by entity)
-  - `laminar.shutdown.forced` - Failed graceful shutdowns
+  - `laminar.mutation.duration` - Mutation processing time (with percentiles)
+  - `laminar.batch.size` - Coalescing efficiency metrics
+  - `laminar.ratelimit.count` - Rate limiting events
+  - `laminar.circuitbreaker.state.change` - Circuit breaker transitions
+  - `laminar.saga.duration` - Saga execution times
+  - `laminar.dlq.event` - Dead letter queue operations
 - **SLF4J Logging**: Production-grade logging throughout
 - **Thread Naming**: Configurable prefixes for monitoring
+- **Custom Tags**: Entity type, operation, status, and more
 
 ### ✅ Configuration
 - **Spring Boot Properties**: All settings via `application.yml`
@@ -312,6 +321,93 @@ laminar:
 
 ---
 
+## 🆕 New Market-Leading Features
+
+### Priority-Based Processing
+Implement SLA guarantees by assigning priority levels to mutations:
+
+```java
+public class PremiumXpMutation implements Mutation<User> {
+    private final String userId;
+    private final long amount;
+
+    @Override
+    public String getEntityKey() {
+        return userId;
+    }
+
+    @Override
+    public int getPriority() {
+        return 8; // High priority for premium users (scale: 1-10)
+    }
+
+    @Override
+    public Mutation<User> coalesce(Mutation<User> other) {
+        // ...
+    }
+
+    @Override
+    public void apply(User user) {
+        user.addXp(amount);
+    }
+}
+```
+
+### Token Bucket Rate Limiter
+High-throughput rate limiting with burst support:
+
+```java
+// Allow 100 requests/sec with burst capacity of 200
+TokenBucketRateLimiter limiter = new TokenBucketRateLimiter(100, Duration.ofSeconds(1), 200);
+
+if (limiter.allowRequest("user-123")) {
+    // Process request
+} else {
+    // Reject with 429 Too Many Requests
+}
+```
+
+### Circuit Breaker Pattern
+Prevent cascading failures with automatic recovery:
+
+```java
+CircuitBreaker breaker = new CircuitBreaker.Builder()
+    .failureThreshold(5)
+    .successThreshold(3)
+    .timeout(Duration.ofSeconds(30))
+    .build();
+
+try {
+    String result = breaker.executeSupplier(() -> callExternalService());
+} catch (CircuitBreakerOpenException e) {
+    // Fail fast or use fallback
+    return getFallbackValue();
+}
+```
+
+### OpenTelemetry Integration
+Distributed tracing and comprehensive metrics:
+
+```yaml
+# application.yml
+laminar:
+  telemetry:
+    enabled: true
+    export:
+      prometheus: true
+      otlp:
+        endpoint: http://tempo:4317
+```
+
+Metrics available:
+- `laminar.mutation.duration` - Processing time with p50/p95/p99
+- `laminar.batch.size` - Coalescing efficiency
+- `laminar.ratelimit.count` - Rate limiting events
+- `laminar.circuitbreaker.state.change` - Circuit transitions
+- `laminar.saga.duration` - Saga execution times
+
+---
+
 ## 🛠️ Quick Start
 
 ### 1. Define a Mutation
@@ -338,6 +434,12 @@ public class XpMutation implements Mutation<User> {
     @Override
     public void apply(User user) {
         user.addXp(amount);
+    }
+    
+    // Optional: Add priority for SLA-based processing
+    @Override
+    public int getPriority() {
+        return 5; // Normal priority (default is 0)
     }
 }
 ```

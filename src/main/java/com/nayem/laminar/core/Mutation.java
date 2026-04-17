@@ -15,7 +15,7 @@ package com.nayem.laminar.core;
 public interface Mutation<T> {
 
     /**
-     * returns the unique ID of the entity this mutation affects.
+     * Returns the unique ID of the entity this mutation affects.
      * All mutations with the same Key will be routed to the same worker.
      */
     String getEntityKey();
@@ -44,4 +44,27 @@ public interface Mutation<T> {
      *               op).
      */
     void apply(T entity);
+    
+    /**
+     * Returns the priority level of this mutation. Higher values indicate higher priority.
+     * <p>
+     * Default implementation returns 0 (normal priority). Override to implement
+     * priority-based processing where high-priority mutations are processed before
+     * low-priority ones within the same entity queue.
+     * </p>
+     * <p>
+     * Priority levels convention:
+     * </p>
+     * <ul>
+     *   <li>1-3: Low priority (background tasks, analytics)</li>
+     *   <li>4-6: Normal priority (standard user operations)</li>
+     *   <li>7-9: High priority (premium users, time-sensitive operations)</li>
+     *   <li>10: Critical priority (security operations, system-critical updates)</li>
+     * </ul>
+     * 
+     * @return priority level (default: 0)
+     */
+    default int getPriority() {
+        return 0;
+    }
 }
