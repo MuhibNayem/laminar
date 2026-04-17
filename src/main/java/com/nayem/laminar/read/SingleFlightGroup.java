@@ -19,10 +19,11 @@ import java.util.function.Supplier;
  * Useful for preventing Thundering Herd problems on cache misses.
  * </p>
  */
-public class SingleFlightGroup<V> {
+public class SingleFlightGroup<V> implements AutoCloseable {
 
     private final ConcurrentHashMap<String, FlightFuture<V>> flights = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+    private volatile boolean closed = false;
 
     /**
      * Executes the given function if, and only if, there is no other execution
@@ -43,8 +44,13 @@ public class SingleFlightGroup<V> {
      * @param supplier The expensive operation to execute (e.g., DB fetch).
      * @param timeout  Maximum time to wait for the operation (null = no timeout).
      * @return A Future containing the result of the operation.
+     * @throws IllegalStateException if this SingleFlightGroup has been closed
      */
     public CompletableFuture<V> doCall(String key, Supplier<V> supplier, java.time.Duration timeout) {
+        if (closed) {
+            throw new IllegalStateException("SingleFlightGroup has been closed");
+        }
+        
         final java.util.Map<String, String> mdcContext = org.slf4j.MDC.getCopyOfContextMap();
         final Object securityContext = SecurityContextAccessor.get();
 
@@ -138,6 +144,19 @@ public class SingleFlightGroup<V> {
      */
     public boolean isInFlight(String key) {
         return flights.containsKey(key);
+    }
+
+    /**
+     * Closes this SingleFlightGroup and shuts down the executor.
+     * No new calls will be accepted after closing.
+     */
+    @Override
+    public void close() {
+        closed = true;
+        // Cancel all in-flight requests
+        flights.values().forEach(f -> f.cancel(true));
+        flights.clear();
+        executor.shutdownNow();
     }
 
     /**

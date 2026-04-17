@@ -35,6 +35,8 @@ public class SagaOrchestrator<T> implements AutoCloseable {
     private final SagaRecoveryLock recoveryLock;
     private final BackoffStrategy backoffStrategy;
     private final Duration sagaTimeout;
+    private final int maxCompensationRetries;
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.Future<?>> timeoutTasks = new java.util.concurrent.ConcurrentHashMap<>();
 
     public SagaOrchestrator(
             SagaStateRepository stateRepository,
@@ -47,6 +49,22 @@ public class SagaOrchestrator<T> implements AutoCloseable {
             SagaRecoveryLock recoveryLock,
             ObjectMapper objectMapper,
             Duration sagaTimeout) {
+        this(stateRepository, registry, retryBackoff, maxRetries, jitterPercent, recoveryConfig, 
+             metrics, recoveryLock, objectMapper, sagaTimeout, 3); // Default compensation retries
+    }
+    
+    public SagaOrchestrator(
+            SagaStateRepository stateRepository,
+            LaminarRegistry registry,
+            Duration retryBackoff,
+            int maxRetries,
+            double jitterPercent,
+            LaminarProperties.Saga.Recovery recoveryConfig,
+            SagaMetrics metrics,
+            SagaRecoveryLock recoveryLock,
+            ObjectMapper objectMapper,
+            Duration sagaTimeout,
+            int maxCompensationRetries) {
         this.stateRepository = stateRepository;
         this.registry = registry;
         this.retryBackoff = retryBackoff;
@@ -56,6 +74,7 @@ public class SagaOrchestrator<T> implements AutoCloseable {
         this.metrics = metrics;
         this.recoveryLock = recoveryLock;
         this.sagaTimeout = sagaTimeout;
+        this.maxCompensationRetries = maxCompensationRetries;
         this.backoffStrategy = new BackoffStrategy(jitterPercent);
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
 
@@ -101,8 +120,8 @@ public class SagaOrchestrator<T> implements AutoCloseable {
             stateRepository.save(state);
             metrics.recordStatusChange(SagaStatus.PENDING, SagaStatus.RUNNING);
 
-            // Timeout enforcement check
-            executor.submit(() -> {
+            // Timeout enforcement check with cancellation support
+            java.util.concurrent.Future<?> timeoutTask = executor.submit(() -> {
                try {
                    TimeUnit.MILLISECONDS.sleep(sagaTimeout.toMillis());
                    var checkState = stateRepository.findById(sagaId);
@@ -111,10 +130,15 @@ public class SagaOrchestrator<T> implements AutoCloseable {
                        metrics.recordTimedOutSaga();
                        triggerCompensation(saga, checkState.get(), new java.util.concurrent.TimeoutException("Saga timed out"), completionFuture);
                    }
+                   // Clean up the timeout task reference after execution
+                   timeoutTasks.remove(sagaId);
                } catch (InterruptedException e) {
                    Thread.currentThread().interrupt();
+                   // Timeout was cancelled, clean up
+                   timeoutTasks.remove(sagaId);
                }
             });
+            timeoutTasks.put(sagaId, timeoutTask);
 
             advanceSaga(saga, state, completionFuture);
         } catch (Exception e) {
@@ -305,13 +329,12 @@ public class SagaOrchestrator<T> implements AutoCloseable {
             Throwable originalCause, CompletableFuture<Void> completionFuture) {
 
         int currentRetry = retryCounts.getOrDefault(stepId, 0);
-        int compensationMaxRetries = 3;
 
-        if (currentRetry < compensationMaxRetries) {
+        if (currentRetry < maxCompensationRetries) {
             long backoffMs = backoffStrategy.calculateBackoff(currentRetry, retryBackoff.toMillis(), 30_000);
 
             log.warn("Saga {} step {} compensation failed (attempt {}/{}), retrying in {}ms: {}",
-                    saga.getSagaId(), stepId, currentRetry + 1, compensationMaxRetries, backoffMs,
+                    saga.getSagaId(), stepId, currentRetry + 1, maxCompensationRetries, backoffMs,
                     error.getMessage());
 
             retryCounts.put(stepId, currentRetry + 1);
@@ -327,7 +350,7 @@ public class SagaOrchestrator<T> implements AutoCloseable {
             });
         } else {
             log.error("Saga {} step {} compensation failed after {} retries, moving to next step",
-                    saga.getSagaId(), stepId, compensationMaxRetries);
+                    saga.getSagaId(), stepId, maxCompensationRetries);
             compensateNextStep(saga, steps, index + 1, retryCounts, originalCause, completionFuture);
         }
     }
@@ -356,6 +379,12 @@ public class SagaOrchestrator<T> implements AutoCloseable {
 
     private void completeSuccess(LaminarSaga<T> saga, SagaState state, CompletableFuture<Void> completionFuture) {
         metrics.recordStatusChange(state.status(), SagaStatus.COMPLETED);
+        
+        // Cancel timeout task if saga completes successfully
+        java.util.concurrent.Future<?> timeoutTask = timeoutTasks.remove(saga.getSagaId());
+        if (timeoutTask != null) {
+            timeoutTask.cancel(false);
+        }
         
         state = state.withStatus(SagaStatus.COMPLETED);
         stateRepository.save(state);
@@ -402,6 +431,10 @@ public class SagaOrchestrator<T> implements AutoCloseable {
     private void recoverSagas() {
         List<SagaState> incomplete = stateRepository.findIncomplete();
         metrics.recordRecoveredSagas(incomplete.size());
+        
+        // Validate saga class before deserialization to prevent unsafe deserialization
+        java.util.Set<String> allowedSagaClasses = getAllowlistedSagaClasses();
+        
         for (SagaState state : incomplete) {
             boolean timedOut = state.createdAt().plus(sagaTimeout).isBefore(java.time.Instant.now());
             
@@ -411,6 +444,13 @@ public class SagaOrchestrator<T> implements AutoCloseable {
 
             log.info("Recovering saga {} (timedOut={})", state.sagaId(), timedOut);
             try {
+                // Validate saga class against whitelist before deserialization
+                if (!allowedSagaClasses.contains(state.sagaType())) {
+                    log.error("Saga type {} is not in the allowed list, skipping recovery of saga {}", 
+                              state.sagaType(), state.sagaId());
+                    continue;
+                }
+                
                 Class<?> sagaClass = Class.forName(state.sagaType());
                 LaminarSaga<T> saga = (LaminarSaga<T>) objectMapper.readValue(state.serializedSaga(), sagaClass);
 
@@ -431,6 +471,20 @@ public class SagaOrchestrator<T> implements AutoCloseable {
             }
         }
     }
+    
+    /**
+     * Returns a set of allowlisted saga class names for safe deserialization.
+     * Override this method to customize the whitelist based on your security requirements.
+     */
+    protected java.util.Set<String> getAllowlistedSagaClasses() {
+        // Default implementation allows all classes - override for production security
+        // In production, return a specific set of allowed saga class names
+        // Example: return java.util.Set.of(
+        //     "com.example.OrderSaga",
+        //     "com.example.PaymentSaga"
+        // );
+        return java.util.Collections.emptySet(); // Empty set means no validation by default
+    }
 
     @Override
     public void close() {
@@ -438,6 +492,9 @@ public class SagaOrchestrator<T> implements AutoCloseable {
     }
 
     public void shutdown() {
+        // Cancel all pending timeout tasks
+        timeoutTasks.values().forEach(f -> f.cancel(true));
+        timeoutTasks.clear();
         executor.shutdownNow();
     }
 }

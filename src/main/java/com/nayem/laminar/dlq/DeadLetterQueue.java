@@ -61,6 +61,29 @@ public interface DeadLetterQueue<T> {
     List<DlqEntry<T>> list(int limit);
 
     /**
+     * Returns metrics collector for DLQ operations.
+     * Override to provide custom metrics implementation.
+     */
+    default DlqMetrics getMetrics() {
+        return DlqMetrics.NO_OP;
+    }
+
+    /**
+     * Metrics interface for DLQ operations.
+     */
+    interface DlqMetrics {
+        void recordSend();
+        void recordPoll();
+        void recordAcknowledge();
+        
+        DlqMetrics NO_OP = new DlqMetrics() {
+            @Override public void recordSend() {}
+            @Override public void recordPoll() {}
+            @Override public void recordAcknowledge() {}
+        };
+    }
+
+    /**
      * Represents an entry in the dead-letter queue.
      *
      * @param <T> The entity type

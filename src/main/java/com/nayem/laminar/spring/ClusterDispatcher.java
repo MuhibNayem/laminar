@@ -39,6 +39,9 @@ public class ClusterDispatcher<T> implements LaminarDispatcher<T> {
     private final AtomicReference<Instant> circuitOpenTime = new AtomicReference<>(null);
     private final int failureThreshold;
     private final Duration circuitResetTimeout;
+    
+    // Use atomic boolean to prevent race condition in circuit breaker state transitions
+    private final java.util.concurrent.atomic.AtomicBoolean circuitOpening = new java.util.concurrent.atomic.AtomicBoolean(false);
 
     private volatile LaminarEngine<T> fallbackEngine = null;
 
@@ -136,10 +139,17 @@ public class ClusterDispatcher<T> implements LaminarDispatcher<T> {
 
     private void handleRedisFailure(Exception e) {
         int failures = failureCount.incrementAndGet();
-        if (failures >= failureThreshold) {
-            log.error("Circuit breaker OPEN for entity type {} after {} failures: {}",
-                    entityType.getSimpleName(), failures, e.getMessage());
-            circuitOpenTime.set(Instant.now());
+        if (failures >= failureThreshold && circuitOpening.compareAndSet(false, true)) {
+            try {
+                // Double-check pattern: only open circuit if still above threshold
+                if (failureCount.get() >= failureThreshold) {
+                    log.error("Circuit breaker OPEN for entity type {} after {} failures: {}",
+                            entityType.getSimpleName(), failures, e.getMessage());
+                    circuitOpenTime.set(Instant.now());
+                }
+            } finally {
+                circuitOpening.set(false);
+            }
         } else {
             log.warn("Redis failure {} of {}: {}", failures, failureThreshold, e.getMessage());
         }

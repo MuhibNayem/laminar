@@ -96,42 +96,68 @@ public class EntityWorker<T> {
     }
 
     private void runLoop() {
-        while (true) {
-            CoalescingBatch<T> batchToProcess = null;
+        try {
+            while (true) {
+                CoalescingBatch<T> batchToProcess = null;
 
-            lock.lock();
-            try {
-                if (pendingBatch == null) {
-                    isRunning = false;
-                    return;
+                lock.lock();
+                try {
+                    if (pendingBatch == null) {
+                        isRunning = false;
+                        return;
+                    }
+                    batchToProcess = pendingBatch;
+                    pendingBatch = null;
+                } finally {
+                    lock.unlock();
                 }
-                batchToProcess = pendingBatch;
-                pendingBatch = null;
-            } finally {
-                lock.unlock();
-            }
 
+                try {
+                    processor.accept(batchToProcess);
+                    batchToProcess.getWaiters().forEach(f -> f.complete(null));
+                } catch (Exception e) {
+                    if (dlq != null) {
+                        try {
+                            Mutation<T> m = batchToProcess.getAccumulatedMutation();
+                            dlq.send(new DeadLetterQueue.DlqEntry<>(
+                                    UUID.randomUUID().toString(),
+                                    m,
+                                    key,
+                                    e.getMessage() != null ? e.getMessage() : "Unknown error",
+                                    e.getClass().getName(),
+                                    0,
+                                    Instant.now(),
+                                    null));
+                        } catch (Exception dlqEx) {
+                            log.error("Failed to send mutation to DLQ for key: " + key, dlqEx);
+                        }
+                    }
+                    batchToProcess.getWaiters().forEach(f -> f.completeExceptionally(e));
+                }
+            }
+        } catch (Throwable t) {
+            // Catch any unexpected errors and ensure proper cleanup
+            log.error("Unexpected error in worker runLoop for key: " + key, t);
+            
+            // Interrupt the thread to signal error state
+            Thread.currentThread().interrupt();
+            
+            // Fail any pending waiters if lock can be acquired
             try {
-                processor.accept(batchToProcess);
-                batchToProcess.getWaiters().forEach(f -> f.complete(null));
-            } catch (Exception e) {
-                if (dlq != null) {
+                if (lock.tryLock()) {
                     try {
-                        Mutation<T> m = batchToProcess.getAccumulatedMutation();
-                        dlq.send(new DeadLetterQueue.DlqEntry<>(
-                                UUID.randomUUID().toString(),
-                                m,
-                                key,
-                                e.getMessage() != null ? e.getMessage() : "Unknown error",
-                                e.getClass().getName(),
-                                0,
-                                Instant.now(),
-                                null));
-                    } catch (Exception dlqEx) {
-                        log.error("Failed to send mutation to DLQ for key: " + key, dlqEx);
+                        if (pendingBatch != null) {
+                            pendingBatch.getWaiters().forEach(f -> 
+                                f.completeExceptionally(new RuntimeException("Worker failed: " + t.getMessage())));
+                            pendingBatch = null;
+                        }
+                        isRunning = false;
+                    } finally {
+                        lock.unlock();
                     }
                 }
-                batchToProcess.getWaiters().forEach(f -> f.completeExceptionally(e));
+            } catch (Exception e) {
+                log.error("Error cleaning up after worker failure", e);
             }
         }
     }
