@@ -2,6 +2,7 @@ package com.nayem.laminar.telemetry;
 
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tag;
+import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -99,9 +100,9 @@ public class LaminarTelemetry {
             
             meterRegistry.counter(
                 "laminar.mutation.count",
-                Tag.of("entity.type", entityType),
-                Tag.of("operation", operation),
-                Tag.of("status", success ? "success" : "failure")
+                Tags.of("entity.type", entityType,
+                        "operation", operation,
+                        "status", success ? "success" : "failure")
             ).increment();
             
         } catch (Exception e) {
@@ -133,12 +134,12 @@ public class LaminarTelemetry {
             
             meterRegistry.counter(
                 "laminar.batch.count",
-                Tag.of("entity.type", entityType)
+                Tags.of("entity.type", entityType)
             ).increment();
             
             meterRegistry.summary(
                 "laminar.batch.size",
-                Tag.of("entity.type", entityType)
+                Tags.of("entity.type", entityType)
             ).record(batchSize);
             
             meterRegistry.gauge(
@@ -166,8 +167,7 @@ public class LaminarTelemetry {
         try {
             meterRegistry.counter(
                 "laminar.ratelimit.count",
-                Tag.of("key", key),
-                Tag.of("allowed", String.valueOf(allowed))
+                Tags.of("key", key, "allowed", String.valueOf(allowed))
             ).increment();
             
         } catch (Exception e) {
@@ -190,9 +190,9 @@ public class LaminarTelemetry {
         try {
             meterRegistry.counter(
                 "laminar.circuitbreaker.state.change",
-                Tag.of("service", serviceName),
-                Tag.of("from.state", fromState),
-                Tag.of("to.state", toState)
+                Tags.of("service", serviceName,
+                        "from.state", fromState,
+                        "to.state", toState)
             ).increment();
             
         } catch (Exception e) {
@@ -225,8 +225,7 @@ public class LaminarTelemetry {
             
             meterRegistry.counter(
                 "laminar.saga.count",
-                Tag.of("saga.type", sagaType),
-                Tag.of("status", status)
+                Tags.of("saga.type", sagaType, "status", status)
             ).increment();
             
         } catch (Exception e) {
@@ -248,8 +247,7 @@ public class LaminarTelemetry {
         try {
             meterRegistry.counter(
                 "laminar.dlq.event",
-                Tag.of("entity.type", entityType),
-                Tag.of("action", action)
+                Tags.of("entity.type", entityType, "action", action)
             ).increment();
             
         } catch (Exception e) {
