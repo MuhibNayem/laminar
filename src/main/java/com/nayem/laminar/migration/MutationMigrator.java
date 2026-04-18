@@ -101,7 +101,7 @@ public class MutationMigrator {
     public <T extends Mutation<?>> T migrate(T mutation, int targetVersion) {
         if (!(mutation instanceof VersionedMutation vm)) {
             // Non-versioned mutation, assume v1
-            if (targetVersion > 1 && !transformers.isEmpty()) {
+            if (targetVersion > 1) {
                 return applyTransformers((T) wrapAsVersioned(mutation), 1, targetVersion);
             }
             return mutation;
@@ -208,23 +208,7 @@ public class MutationMigrator {
     }
     
     private Mutation<?> wrapAsVersioned(Mutation<?> mutation) {
-        // Create a wrapper that reports version 1
-        return new Mutation<>() {
-            @Override
-            public String getEntityKey() {
-                return mutation.getEntityKey();
-            }
-            
-            @Override
-            public Mutation<?> coalesce(Mutation<?> other) {
-                return mutation.coalesce(other);
-            }
-            
-            @Override
-            public void apply(Object entity) {
-                mutation.apply(entity);
-            }
-        };
+        return new VersionedMutationWrapper<>(mutation);
     }
     
     /**
@@ -247,4 +231,33 @@ public class MutationMigrator {
      * @param message deprecation message with migration guidance
      */
     public record FieldDeprecation(String deprecatedSince, String message) {}
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static final class VersionedMutationWrapper<T> implements Mutation<T>, VersionedMutation {
+        private final Mutation delegate;
+
+        private VersionedMutationWrapper(Mutation<T> delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public String getEntityKey() {
+            return delegate.getEntityKey();
+        }
+
+        @Override
+        public Mutation<T> coalesce(Mutation<T> other) {
+            return delegate.coalesce(other);
+        }
+
+        @Override
+        public void apply(T entity) {
+            delegate.apply(entity);
+        }
+
+        @Override
+        public int getVersion() {
+            return 1;
+        }
+    }
 }

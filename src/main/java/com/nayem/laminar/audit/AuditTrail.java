@@ -470,10 +470,11 @@ public class AuditTrail {
         }
         
         AuditEvent buildAndStore() {
-            String eventId = type.name() + "-" + System.currentTimeMillis() + "-" + sequenceGenerator.incrementAndGet();
+            long sequence = sequenceGenerator.incrementAndGet();
+            String eventId = type.name() + "-" + System.currentTimeMillis() + "-" + sequence;
             AuditEvent event = new AuditEvent(
                 eventId,
-                sequenceGenerator.get(),
+                sequence,
                 Instant.now(),
                 type,
                 entityKey,

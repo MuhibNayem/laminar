@@ -28,7 +28,7 @@ import java.util.function.Supplier;
  * 
  * try {
  *     String result = breaker.executeSupplier(() -> callExternalService());
- * } catch (CircuitBreakerOpenException e) {
+ * } catch (CircuitBreaker.CircuitBreakerOpenException e) {
  *     // Fail fast or use fallback
  *     return getFallbackValue();
  * }

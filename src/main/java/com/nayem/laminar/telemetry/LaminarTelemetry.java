@@ -1,5 +1,6 @@
 package com.nayem.laminar.telemetry;
 
+import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
@@ -8,23 +9,21 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
-import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * OpenTelemetry-compatible telemetry integration for Laminar.
+ * Metrics telemetry integration for Laminar.
  * <p>
- * Provides distributed tracing, metrics, and logging integration using Micrometer
- * as the bridge to OpenTelemetry backends (Prometheus, Grafana Tempo, Jaeger, etc.).
+ * Provides metrics and logging integration using Micrometer
+ * for backends such as Prometheus and OpenTelemetry bridges.
  * </p>
  * 
  * <h2>Features</h2>
  * <ul>
- *   <li>Automatic span creation for mutation processing</li>
  *   <li>Metrics for batch processing, coalescing efficiency, and worker performance</li>
- *   <li>Context propagation for distributed tracing</li>
  *   <li>Custom tags for entity types, operations, and status</li>
  * </ul>
  * 
@@ -35,10 +34,6 @@ import java.util.concurrent.TimeUnit;
  * // Record mutation processing
  * telemetry.recordMutation("user", "add_xp", Duration.ofMillis(50), true);
  * 
- * // Create a span for batch processing
- * try (var span = telemetry.createSpan("batch.process", Map.of("entity.type", "user"))) {
- *     // Process batch
- * }
  * }</pre>
  * 
  * <h2>Integration with OpenTelemetry</h2>
@@ -57,6 +52,7 @@ public class LaminarTelemetry {
     
     private final MeterRegistry meterRegistry;
     private final Map<String, Timer> timerCache = new ConcurrentHashMap<>();
+    private final Map<String, AtomicReference<Double>> coalescingRatioGaugeCache = new ConcurrentHashMap<>();
     private final boolean enabled;
     
     /**
@@ -127,8 +123,7 @@ public class LaminarTelemetry {
             Timer timer = getOrCreateTimer(
                 "laminar.batch.duration",
                 "Duration of batch processing",
-                Tag.of("entity.type", entityType),
-                Tag.of("batch.size", String.valueOf(batchSize))
+                Tag.of("entity.type", entityType)
             );
             timer.record(duration);
             
@@ -142,11 +137,18 @@ public class LaminarTelemetry {
                 Tags.of("entity.type", entityType)
             ).record(batchSize);
             
-            meterRegistry.gauge(
-                "laminar.coalescing.ratio",
-                Collections.singletonList(Tag.of("entity.type", entityType)),
-                coalescingRatio
+            AtomicReference<Double> ratioRef = coalescingRatioGaugeCache.computeIfAbsent(
+                entityType,
+                type -> {
+                    AtomicReference<Double> reference = new AtomicReference<>(0.0d);
+                    Gauge.builder("laminar.coalescing.ratio", reference, AtomicReference::get)
+                        .description("Observed coalescing ratio per entity type")
+                        .tags(Tags.of("entity.type", type))
+                        .register(meterRegistry);
+                    return reference;
+                }
             );
+            ratioRef.set(coalescingRatio);
             
         } catch (Exception e) {
             log.debug("Failed to record batch telemetry", e);

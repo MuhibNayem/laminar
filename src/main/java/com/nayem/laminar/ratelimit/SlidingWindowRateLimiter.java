@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * 
  * <h2>Usage Example</h2>
  * <pre>{@code
- * RateLimiter limiter = new RateLimiter(100, Duration.ofSeconds(1));
+ * SlidingWindowRateLimiter limiter = new SlidingWindowRateLimiter(100, Duration.ofSeconds(1));
  * 
  * if (limiter.allowRequest("user-123")) {
  *     // Process request

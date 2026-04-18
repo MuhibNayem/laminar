@@ -35,7 +35,7 @@ Laminar intercepts those 10,000 requests, **merges them into ONE** operation (+1
 - **Read Coalescing**: `SingleFlightGroup` prevents thundering herd
 - **Linearization**: Strict ordering per entity key
 - **Fire-and-Forget**: `@Dispatch` annotation for seamless integration
-- **Priority Queues**: SLA-based processing with priority levels (1-10)
+- **Priority API Hook**: `Mutation#getPriority()` for custom scheduling integrations
 
 ### ✅ Resilience Patterns
 - **Token Bucket Rate Limiter**: High-throughput rate limiting with burst support
@@ -47,7 +47,7 @@ Laminar intercepts those 10,000 requests, **merges them into ONE** operation (+1
 - **Error Handling**: Configurable error callbacks
 
 ### ✅ Observability & Telemetry
-- **OpenTelemetry Integration**: Distributed tracing via Micrometer bridge
+- **Micrometer-based Metrics**: Integrates with Spring Boot Actuator
 - **Micrometer Metrics**: Auto-wired to Spring Boot Actuator
   - `laminar.mutation.duration` - Mutation processing time (with percentiles)
   - `laminar.batch.size` - Coalescing efficiency metrics
@@ -324,7 +324,7 @@ laminar:
 ## 🆕 New Market-Leading Features
 
 ### Priority-Based Processing
-Implement SLA guarantees by assigning priority levels to mutations:
+Define mutation priority metadata for custom schedulers or future priority-aware worker implementations:
 
 ```java
 public class PremiumXpMutation implements Mutation<User> {
@@ -379,24 +379,22 @@ CircuitBreaker breaker = new CircuitBreaker.Builder()
 
 try {
     String result = breaker.executeSupplier(() -> callExternalService());
-} catch (CircuitBreakerOpenException e) {
+} catch (CircuitBreaker.CircuitBreakerOpenException e) {
     // Fail fast or use fallback
     return getFallbackValue();
 }
 ```
 
-### OpenTelemetry Integration
-Distributed tracing and comprehensive metrics:
+### Metrics Integration
+Expose Laminar metrics through your configured Micrometer registry and Spring Boot Actuator:
 
 ```yaml
 # application.yml
-laminar:
-  telemetry:
-    enabled: true
-    export:
-      prometheus: true
-      otlp:
-        endpoint: http://tempo:4317
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,laminar
 ```
 
 Metrics available:
@@ -439,7 +437,7 @@ public class XpMutation implements Mutation<User> {
     // Optional: Add priority for SLA-based processing
     @Override
     public int getPriority() {
-        return 5; // Normal priority (default is 0)
+        return 5; // Normal priority (0 means default/unspecified)
     }
 }
 ```

@@ -41,7 +41,9 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class TokenBucketRateLimiter {
     
-    private final long refillRatePerMs;      // Tokens added per millisecond
+    private final double refillRatePerMs;    // Tokens added per millisecond
+    private final long refillRate;
+    private final long timeUnitMs;
     private final long capacity;             // Maximum tokens in bucket
     private final Map<String, BucketState> buckets = new ConcurrentHashMap<>();
     
@@ -53,8 +55,19 @@ public class TokenBucketRateLimiter {
      * @param capacity maximum number of tokens the bucket can hold (burst capacity)
      */
     public TokenBucketRateLimiter(long refillRate, Duration timeUnit, long capacity) {
-        long timeUnitMs = timeUnit.toMillis();
-        this.refillRatePerMs = refillRate * 1_000 / timeUnitMs;
+        if (refillRate <= 0) {
+            throw new IllegalArgumentException("refillRate must be greater than 0");
+        }
+        if (capacity <= 0) {
+            throw new IllegalArgumentException("capacity must be greater than 0");
+        }
+        long unitMs = timeUnit.toMillis();
+        if (unitMs <= 0) {
+            throw new IllegalArgumentException("timeUnit must be at least 1 millisecond");
+        }
+        this.refillRate = refillRate;
+        this.timeUnitMs = unitMs;
+        this.refillRatePerMs = (double) refillRate / unitMs;
         this.capacity = capacity;
     }
     
@@ -82,13 +95,7 @@ public class TokenBucketRateLimiter {
         BucketState state = buckets.computeIfAbsent(key, k -> new BucketState(capacity, now));
         
         synchronized (state) {
-            // Calculate tokens to add based on elapsed time
-            long elapsed = now - state.lastRefillTime;
-            long tokensToAdd = elapsed * refillRatePerMs;
-            
-            // Refill bucket (capped at capacity)
-            state.tokens = Math.min(capacity, state.tokens + tokensToAdd);
-            state.lastRefillTime = now;
+            refill(state, now);
             
             // Try to consume a token
             if (state.tokens >= 1) {
@@ -121,13 +128,7 @@ public class TokenBucketRateLimiter {
         BucketState state = buckets.computeIfAbsent(key, k -> new BucketState(capacity, now));
         
         synchronized (state) {
-            // Calculate tokens to add based on elapsed time
-            long elapsed = now - state.lastRefillTime;
-            long tokensToAdd = elapsed * refillRatePerMs;
-            
-            // Refill bucket (capped at capacity)
-            state.tokens = Math.min(capacity, state.tokens + tokensToAdd);
-            state.lastRefillTime = now;
+            refill(state, now);
             
             // Try to consume tokens
             if (state.tokens >= tokens) {
@@ -156,7 +157,7 @@ public class TokenBucketRateLimiter {
         
         synchronized (state) {
             long elapsed = now - state.lastRefillTime;
-            long tokensToAdd = elapsed * refillRatePerMs;
+            long tokensToAdd = (long) (elapsed * refillRatePerMs);
             return Math.min(capacity, state.tokens + tokensToAdd);
         }
     }
@@ -174,7 +175,7 @@ public class TokenBucketRateLimiter {
                 "key", key,
                 "availableTokens", capacity,
                 "capacity", capacity,
-                "refillRatePerSec", refillRatePerMs * 1000,
+                "refillRatePerSec", (double) refillRate * 1000 / timeUnitMs,
                 "totalRequests", 0,
                 "rejectedRequests", 0,
                 "rejectionRate", 0.0
@@ -191,7 +192,7 @@ public class TokenBucketRateLimiter {
                 "key", key,
                 "availableTokens", available,
                 "capacity", capacity,
-                "refillRatePerSec", refillRatePerMs * 1000,
+                "refillRatePerSec", (double) refillRate * 1000 / timeUnitMs,
                 "totalRequests", total,
                 "rejectedRequests", rejected,
                 "rejectionRate", rejectionRate
@@ -216,6 +217,18 @@ public class TokenBucketRateLimiter {
      */
     public void remove(String key) {
         buckets.remove(key);
+    }
+
+    private void refill(BucketState state, long now) {
+        long elapsed = now - state.lastRefillTime;
+        if (elapsed <= 0) {
+            return;
+        }
+        long tokensToAdd = (long) (elapsed * refillRatePerMs);
+        if (tokensToAdd > 0) {
+            state.tokens = Math.min(capacity, state.tokens + tokensToAdd);
+            state.lastRefillTime = now;
+        }
     }
     
     /**

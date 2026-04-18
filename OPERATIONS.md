@@ -1287,25 +1287,11 @@ curl -s http://localhost:8080/actuator/metrics/laminar.saga.step.execution | \
 
 ### Rate Limiter Operations
 
-#### Token Bucket Configuration
-```yaml
-laminar:
-  ratelimit:
-    token-bucket:
-      enabled: true
-      default-rate: 100        # requests per second
-      default-capacity: 200    # burst capacity
-```
-
-#### Sliding Window Configuration
-```yaml
-laminar:
-  ratelimit:
-    sliding-window:
-      enabled: true
-      default-max-requests: 1000
-      default-window-size: 60s
-```
+> **Implementation status note**
+>
+> `laminar.ratelimit.*`, `laminar.resilience.*`, `laminar.worker.priority-*`, and
+> `laminar.telemetry.*` keys are not currently represented in `LaminarProperties`.
+> Do not add those keys expecting runtime behavior changes until they are implemented.
 
 #### Monitoring Rate Limiting
 ```bash
@@ -1320,15 +1306,8 @@ curl http://localhost:8080/actuator/metrics/laminar.ratelimit.count | \
 ### Circuit Breaker Operations
 
 #### Configuration
-```yaml
-laminar:
-  resilience:
-    circuit-breaker:
-      enabled: true
-      default-failure-threshold: 5
-      default-success-threshold: 3
-      default-timeout: 30s
-```
+Circuit breaker settings are currently configured in code where `CircuitBreaker.Builder`
+is used. There is no bound `laminar.resilience.*` property model yet.
 
 #### Manual Circuit Control
 ```bash
@@ -1357,38 +1336,27 @@ laminar:
       timeout: 60s
 ```
 
-### Priority Queue Operations
+### Priority Metadata Operations
 
 #### Configuration
-```yaml
-laminar:
-  worker:
-    priority-enabled: true
-    priority-levels: 10  # Default: 1-10 scale
-```
+Priority is currently metadata on `Mutation#getPriority()` and is not yet wired to a
+priority queue scheduler in worker configuration properties.
 
 #### Monitoring Priority Processing
 ```bash
-# Check processing latency by priority
-curl http://localhost:8080/actuator/metrics/laminar.mutation.duration | \
-  jq '.tags[] | select(.tag == \"priority\")'
+# Check available tags emitted by mutation latency metric
+curl http://localhost:8080/actuator/metrics/laminar.mutation.duration | jq '.availableTags'
 ```
 
 ### Telemetry Operations
 
-#### OpenTelemetry Configuration
+#### Metrics Endpoint Configuration
 ```yaml
-laminar:
-  telemetry:
-    enabled: true
-    export:
-      prometheus:
-        enabled: true
-      otlp:
-        enabled: true
-        endpoint: http://tempo:4317
-        headers:
-          authorization: "Bearer ${OTEL_AUTH_TOKEN}"
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,laminar
 ```
 
 #### Available Metrics
