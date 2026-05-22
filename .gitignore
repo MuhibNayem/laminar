@@ -1,19 +1,22 @@
+```
 # Compiled and build artifacts
 *.class
+*.jar
+*.war
+*.ear
 *.o
 *.obj
 *.out
-build/
 target/
 
 # Dependencies
-.mypy_cache/
-.pytest_cache/
+.m2/
 .gradle/
 node_modules/
 venv/
 .venv/
 __pycache__/
+*.egg-info/
 
 # Logs and temp files
 *.log
@@ -28,3 +31,20 @@ __pycache__/
 # Editors
 .vscode/
 .idea/
+*.iml
+*.ipr
+*.iws
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
+
+# Build tools
+build/
+dist/
+```
